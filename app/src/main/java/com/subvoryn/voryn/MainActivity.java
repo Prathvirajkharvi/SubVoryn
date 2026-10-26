@@ -169,7 +169,7 @@ public class MainActivity extends Activity {
         speedSpinner.setSelection(1);
         videoCard.addView(speedSpinner, margin(-1, dp(46), 0, 8));
         videoCard.addView(text("SUBTITLE AREA", 10, C_ACCENT, true), margin(-1, -2, 0, 4));
-        regionSpinner = spinner(new String[] {"Bottom 35% (recommended)", "Bottom 50%", "Top 35%", "Full frame"});
+        regionSpinner = spinner(new String[] {"Bottom 22% (recommended)", "Bottom 35%", "Top 22%", "Full frame"});
         videoCard.addView(regionSpinner, margin(-1, dp(46), 0, 8));
         ocrProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         ocrProgress.setMax(100);
@@ -698,23 +698,23 @@ public class MainActivity extends Activity {
                         } else {
                             tess.setImage(crop);
                             recognized = cleanOcrText(tess.getUTF8Text());
-                            if (tess.meanConfidence() < 14) recognized = "";
+                            if (tess.meanConfidence() < 25) recognized = "";
                             lastFingerprint = fingerprint;
                             cachedText = recognized;
                         }
                         String normalized = normalizeOcr(recognized);
                         if (recognized.length() > 0 && normalized.length() > 1) {
-                            if (found.size() > 0 && normalized.equals(activeNorm) && lastDetectedAt >= 0L && t - lastDetectedAt <= (long)(intervalMs * 2.1)) {
+                            if (found.size() > 0 && lastDetectedAt >= 0L && t - lastDetectedAt <= (long)(intervalMs * 2.1) && (normalized.equals(activeNorm) || areSimilarOcrTexts(activeNorm, normalized))) {
                                 SubtitleCue active = found.get(found.size() - 1);
                                 active.endMs = Math.min(actualDuration, t + intervalMs);
-                                if (recognized.length() > active.text.length() && recognized.length() < 180) {
+                                if (recognized.length() < 180 && subtitleTextQuality(recognized) > subtitleTextQuality(active.text)) {
                                     active.text = recognized;
                                     active.rawText = recognized;
                                 }
                             } else {
                                 long end = Math.min(actualDuration, t + intervalMs);
                                 if (end <= t) end = Math.min(actualDuration, t + 100L);
-                                SubtitleCue cue = new SubtitleCue(t, end, recognized);
+                                SubtitleCue cue = new SubtitleCue(Math.max(0L, t - intervalMs / 2L), end, recognized);
                                 cue.rawText = recognized;
                                 cue.text = recognized;
                                 cue.alignment = 2;
@@ -809,9 +809,9 @@ public class MainActivity extends Activity {
         int height = frame.getHeight();
         int top = 0;
         int cropHeight = height;
-        if (regionChoice == 0) { cropHeight = Math.max(1, (int)(height * 0.35f)); top = height - cropHeight; }
-        else if (regionChoice == 1) { cropHeight = Math.max(1, (int)(height * 0.50f)); top = height - cropHeight; }
-        else if (regionChoice == 2) { cropHeight = Math.max(1, (int)(height * 0.35f)); top = 0; }
+        if (regionChoice == 0) { cropHeight = Math.max(1, (int)(height * 0.22f)); top = height - cropHeight; }
+        else if (regionChoice == 1) { cropHeight = Math.max(1, (int)(height * 0.35f)); top = height - cropHeight; }
+        else if (regionChoice == 2) { cropHeight = Math.max(1, (int)(height * 0.22f)); top = 0; }
         if (top == 0 && cropHeight == height) return frame;
         return Bitmap.createBitmap(frame, 0, top, width, cropHeight);
     }
@@ -834,22 +834,138 @@ public class MainActivity extends Activity {
     private String cleanOcrText(String raw) {
         if (raw == null) return "";
         String[] lines = raw.replace('\r', '\n').split("\\n");
+        ArrayList<String> accepted = new ArrayList<String>();
+        ArrayList<Integer> scores = new ArrayList<Integer>();
+
+        for (String item : lines) {
+            String line = item.replaceAll("[|¦·•_=~]+", " ")
+                    .replaceAll("\\s+", " ").trim();
+            line = line.replaceAll("^[^\\p{L}\\p{N}]+", "")
+                    .replaceAll("[^\\p{L}\\p{N}!?.,'’\\-]+$", "").trim();
+            if (!isLikelySubtitleLine(line)) continue;
+
+            String norm = normalizeOcr(line);
+            boolean duplicate = false;
+            for (String old : accepted) {
+                if (norm.equals(normalizeOcr(old))) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (!duplicate) {
+                accepted.add(line);
+                scores.add(Integer.valueOf(subtitleLineScore(line)));
+            }
+        }
+
+        if (accepted.size() == 0) return "";
+        ArrayList<Integer> chosen = new ArrayList<Integer>();
+        while (chosen.size() < 2 && chosen.size() < accepted.size()) {
+            int best = -1;
+            int bestScore = Integer.MIN_VALUE;
+            for (int i = 0; i < scores.size(); i++) {
+                if (chosen.contains(Integer.valueOf(i))) continue;
+                int score = scores.get(i).intValue();
+                if (score > bestScore) {
+                    best = i;
+                    bestScore = score;
+                }
+            }
+            if (best < 0 || bestScore < 10) break;
+            if (chosen.size() > 0 &&
+                    bestScore < scores.get(chosen.get(0).intValue()).intValue() * 0.50) break;
+            chosen.add(Integer.valueOf(best));
+        }
+
+        if (chosen.size() == 2 && chosen.get(0) > chosen.get(1)) {
+            Integer temp = chosen.get(0);
+            chosen.set(0, chosen.get(1));
+            chosen.set(1, temp);
+        }
+
         StringBuilder out = new StringBuilder();
-        for (int i = 0; i < lines.length; i++) {
-            String line = lines[i].replaceAll("\\s+", " ").trim();
-            line = line.replaceAll("^[|¦·•_=~]+", "").replaceAll("[|¦·•_=~]+$", "").trim();
-            if (line.length() == 0) continue;
+        for (Integer index : chosen) {
             if (out.length() > 0) out.append("\\N");
-            out.append(line);
+            out.append(accepted.get(index.intValue()));
         }
         String value = out.toString().trim();
-        String norm = normalizeOcr(value);
-        return norm.length() < 2 ? "" : value;
+        return normalizeOcr(value).length() < 2 ? "" : value;
+    }
+
+    private boolean isLikelySubtitleLine(String line) {
+        if (line == null || line.length() < 3 || line.length() > 110) return false;
+        String norm = normalizeOcr(line);
+        if (norm.length() < 3) return false;
+
+        int visible = 0, alnum = 0;
+        for (int i = 0; i < line.length(); i++) {
+            char ch = line.charAt(i);
+            if (!Character.isWhitespace(ch)) visible++;
+            if (Character.isLetterOrDigit(ch)) alnum++;
+        }
+        if (visible == 0 || alnum / (double) visible < 0.58) return false;
+
+        String[] words = norm.split(" ");
+        if (words.length > 15) return false;
+        int shortWords = 0, longWords = 0;
+        for (String word : words) {
+            if (word.length() <= 2) shortWords++;
+            if (word.length() >= 3) longWords++;
+        }
+        if (words.length >= 5 && shortWords / (double) words.length > 0.52) return false;
+        if (words.length >= 5 && longWords < 2) return false;
+        if (words.length == 1 && norm.length() < 4) return false;
+        return true;
+    }
+
+    private int subtitleLineScore(String line) {
+        String norm = normalizeOcr(line);
+        String[] words = norm.split(" ");
+        String common = " the and you he she we they it is are was were be do did have has to of or but if what when where why how not yes no this that with for from in on at my your me us can will just so hai hain ho na bhi toh to main mein tum mujhe ye woh ek nahi kya ka ki ke ko se ";
+        int longWords = 0, shortWords = 0, known = 0;
+        for (String word : words) {
+            if (word.length() >= 3) longWords++;
+            if (word.length() <= 2) shortWords++;
+            if (common.contains(" " + word + " ")) known++;
+        }
+        int score = Math.min(norm.length(), 45) / 2 + longWords * 6 + known * 7 - shortWords * 4;
+        if (known >= 2) score += 10;
+        return score;
+    }
+
+    private int subtitleTextQuality(String text) {
+        if (text == null || text.length() == 0) return 0;
+        String[] lines = text.split("\\\\N|\\n");
+        int score = 0;
+        for (String line : lines) score += subtitleLineScore(line);
+        return score;
+    }
+
+    private boolean areSimilarOcrTexts(String a, String b) {
+        if (a == null || b == null || a.length() < 5 || b.length() < 5) return false;
+        if (a.equals(b)) return true;
+
+        String[] left = a.split(" ");
+        String[] right = b.split(" ");
+        int common = 0;
+        for (String word : left) {
+            if (word.length() < 2) continue;
+            for (String other : right) {
+                if (word.equals(other)) {
+                    common++;
+                    break;
+                }
+            }
+        }
+        int maxWords = Math.max(left.length, right.length);
+        return maxWords > 0 && common / (double) maxWords >= 0.62;
     }
 
     private String normalizeOcr(String value) {
         if (value == null) return "";
-        return value.toLowerCase(Locale.US).replaceAll("[^\\p{L}\\p{N}]+", " ").replaceAll("\\s+", " ").trim();
+        return value.toLowerCase(Locale.US)
+                .replaceAll("[^\\p{L}\\p{N}]+", " ")
+                .replaceAll("\\s+", " ").trim();
     }
 
     private String safeThrowable(Throwable e) {
