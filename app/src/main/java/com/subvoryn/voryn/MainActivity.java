@@ -169,7 +169,7 @@ public class MainActivity extends Activity {
         speedSpinner.setSelection(1);
         videoCard.addView(speedSpinner, margin(-1, dp(46), 0, 8));
         videoCard.addView(text("SUBTITLE AREA", 10, C_ACCENT, true), margin(-1, -2, 0, 4));
-        regionSpinner = spinner(new String[] {"Bottom 22% (recommended)", "Bottom 35%", "Top 22%", "Full frame"});
+        regionSpinner = spinner(new String[] {"Bottom 35% (recommended)", "Bottom 50%", "Top 35%", "Full frame"});
         videoCard.addView(regionSpinner, margin(-1, dp(46), 0, 8));
         ocrProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
         ocrProgress.setMax(100);
@@ -704,7 +704,7 @@ public class MainActivity extends Activity {
                         }
                         String normalized = normalizeOcr(recognized);
                         if (recognized.length() > 0 && normalized.length() > 1) {
-                            if (found.size() > 0 && lastDetectedAt >= 0L && t - lastDetectedAt <= (long)(intervalMs * 2.1) && (normalized.equals(activeNorm) || areSimilarOcrTexts(activeNorm, normalized))) {
+                            if (found.size() > 0 && lastDetectedAt >= 0L && t - lastDetectedAt <= (long)(intervalMs * 2.1) && (normalized.equals(activeNorm) || areSimilarOcrTexts(found.get(found.size() - 1).text, recognized))) {
                                 SubtitleCue active = found.get(found.size() - 1);
                                 active.endMs = Math.min(actualDuration, t + intervalMs);
                                 if (recognized.length() < 180 && subtitleTextQuality(recognized) > subtitleTextQuality(active.text)) {
@@ -740,6 +740,7 @@ public class MainActivity extends Activity {
                     lastUiUpdate = t;
                 }
             }
+            mergeSimilarOcrCues(found, Math.max(900L, intervalMs * 3L));
             SubtitleEngine.mergeConsecutiveDuplicates(found, intervalMs * 2L);
         } catch (Throwable e) {
             error = safeThrowable(e);
@@ -809,9 +810,9 @@ public class MainActivity extends Activity {
         int height = frame.getHeight();
         int top = 0;
         int cropHeight = height;
-        if (regionChoice == 0) { cropHeight = Math.max(1, (int)(height * 0.22f)); top = height - cropHeight; }
-        else if (regionChoice == 1) { cropHeight = Math.max(1, (int)(height * 0.35f)); top = height - cropHeight; }
-        else if (regionChoice == 2) { cropHeight = Math.max(1, (int)(height * 0.22f)); top = 0; }
+        if (regionChoice == 0) { cropHeight = Math.max(1, (int)(height * 0.35f)); top = height - cropHeight; }
+        else if (regionChoice == 1) { cropHeight = Math.max(1, (int)(height * 0.50f)); top = height - cropHeight; }
+        else if (regionChoice == 2) { cropHeight = Math.max(1, (int)(height * 0.35f)); top = 0; }
         if (top == 0 && cropHeight == height) return frame;
         return Bitmap.createBitmap(frame, 0, top, width, cropHeight);
     }
@@ -903,25 +904,30 @@ public class MainActivity extends Activity {
             if (!Character.isWhitespace(ch)) visible++;
             if (Character.isLetterOrDigit(ch)) alnum++;
         }
-        if (visible == 0 || alnum / (double) visible < 0.58) return false;
+        if (visible == 0 || alnum / (double) visible < 0.62) return false;
 
         String[] words = norm.split(" ");
         if (words.length > 15) return false;
-        int shortWords = 0, longWords = 0;
+        int shortWords = 0, longWords = 0, anchoredWords = 0;
+        String common = " the and you he she we they it is are was were be do did have has to of or but if what when where why how not yes no this that with for from in on at my your me us can will just so hai hain ho na bhi toh to main mein tum mujhe ye woh ek nahi kya ka ki ke ko se sirf magic stone hi lagbhag gold gajab kitna bada zyada taaqatwar monsters shikaar karte adventurers high level isse bhi chahiye chahiye tha thi hain hain kya kyun kaisa kaisi kitne kitni hoga hogi kar raha rahi rahe abhi yahan wahan mujhe tumhe unhe unka unki unke sab koi kaun agar lekin phir bahut bilkul andar bahar paise rupaye ghar naam dekho suno achha achhi accha arre arey haan nahi hain hai ji ji haan okay well right sir all only because just now then than there their gold stone magic";
         for (String word : words) {
+            if (word.matches("[0-9]+")) continue;
             if (word.length() <= 2) shortWords++;
             if (word.length() >= 3) longWords++;
+            if (common.contains(" " + word + " ") || common.startsWith(word + " ") || common.endsWith(" " + word)) anchoredWords++;
+            if (word.length() > 18) return false;
         }
-        if (words.length >= 5 && shortWords / (double) words.length > 0.52) return false;
+        if (words.length >= 5 && shortWords / (double) words.length > 0.58) return false;
         if (words.length >= 5 && longWords < 2) return false;
         if (words.length == 1 && norm.length() < 4) return false;
+        if (anchoredWords == 0 && (norm.length() < 22 || longWords < 3)) return false;
         return true;
     }
 
     private int subtitleLineScore(String line) {
         String norm = normalizeOcr(line);
         String[] words = norm.split(" ");
-        String common = " the and you he she we they it is are was were be do did have has to of or but if what when where why how not yes no this that with for from in on at my your me us can will just so hai hain ho na bhi toh to main mein tum mujhe ye woh ek nahi kya ka ki ke ko se ";
+        String common = " the and you he she we they it is are was were be do did have has to of or but if what when where why how not yes no this that with for from in on at my your me us can will just so hai hain ho na bhi toh to main mein tum mujhe ye woh ek nahi kya ka ki ke ko se sirf magic stone hi lagbhag gold gajab kitna bada zyada taaqatwar monsters shikaar karte adventurers high level isse chahiye tha thi raha rahi rahe bahut bilkul achha achhi accha arre arey haan abhi yahan wahan dekho suno ";
         int longWords = 0, shortWords = 0, known = 0;
         for (String word : words) {
             if (word.length() >= 3) longWords++;
@@ -941,24 +947,106 @@ public class MainActivity extends Activity {
         return score;
     }
 
-    private boolean areSimilarOcrTexts(String a, String b) {
-        if (a == null || b == null || a.length() < 5 || b.length() < 5) return false;
-        if (a.equals(b)) return true;
+    private void mergeSimilarOcrCues(List<SubtitleCue> source, long maxGapMs) {
+        if (source == null || source.size() < 2) return;
+        java.util.Collections.sort(source, new java.util.Comparator<SubtitleCue>() {
+            public int compare(SubtitleCue a, SubtitleCue b) {
+                return a.startMs < b.startMs ? -1 : (a.startMs == b.startMs ? 0 : 1);
+            }
+        });
 
-        String[] left = a.split(" ");
-        String[] right = b.split(" ");
-        int common = 0;
-        for (String word : left) {
-            if (word.length() < 2) continue;
-            for (String other : right) {
-                if (word.equals(other)) {
-                    common++;
-                    break;
+        ArrayList<SubtitleCue> clusters = new ArrayList<SubtitleCue>();
+        ArrayList<ArrayList<String>> readings = new ArrayList<ArrayList<String>>();
+        for (int i = 0; i < source.size(); i++) {
+            SubtitleCue cue = source.get(i);
+            int matchIndex = -1;
+            for (int j = clusters.size() - 1; j >= 0; j--) {
+                SubtitleCue cluster = clusters.get(j);
+                if (cue.startMs > cluster.endMs + maxGapMs) continue;
+                if (cue.endMs < cluster.startMs - maxGapMs) continue;
+                ArrayList<String> variants = readings.get(j);
+                for (int k = 0; k < variants.size(); k++) {
+                    if (areSimilarOcrTexts(variants.get(k), cue.text)) {
+                        matchIndex = j;
+                        break;
+                    }
                 }
+                if (matchIndex >= 0) break;
+            }
+
+            if (matchIndex < 0) {
+                clusters.add(cue);
+                ArrayList<String> firstReading = new ArrayList<String>();
+                firstReading.add(cue.text == null ? "" : cue.text);
+                readings.add(firstReading);
+            } else {
+                SubtitleCue target = clusters.get(matchIndex);
+                if (cue.startMs < target.startMs) target.startMs = cue.startMs;
+                if (cue.endMs > target.endMs) target.endMs = cue.endMs;
+                if (subtitleTextQuality(cue.text) > subtitleTextQuality(target.text)) {
+                    target.text = cue.text;
+                    target.rawText = cue.rawText;
+                }
+                readings.get(matchIndex).add(cue.text == null ? "" : cue.text);
             }
         }
-        int maxWords = Math.max(left.length, right.length);
-        return maxWords > 0 && common / (double) maxWords >= 0.62;
+
+        // Remove duplicate cue references if any, then keep the final clusters sorted.
+        source.clear();
+        source.addAll(clusters);
+        java.util.Collections.sort(source, new java.util.Comparator<SubtitleCue>() {
+            public int compare(SubtitleCue a, SubtitleCue b) {
+                return a.startMs < b.startMs ? -1 : (a.startMs == b.startMs ? 0 : 1);
+            }
+        });
+    }
+
+    private boolean areSimilarOcrTexts(String a, String b) {
+        if (a == null || b == null) return false;
+        String na = normalizeOcr(a.replace("\\N", " "));
+        String nb = normalizeOcr(b.replace("\\N", " "));
+        if (na.length() < 5 || nb.length() < 5) return false;
+        if (na.equals(nb)) return true;
+
+        String ca = na.replace(" ", "");
+        String cb = nb.replace(" ", "");
+        double lengthRatio = Math.min(ca.length(), cb.length()) / (double)Math.max(ca.length(), cb.length());
+        if (lengthRatio >= 0.55 && characterSimilarity(ca, cb) >= 0.60) return true;
+
+        String[] left = na.split(" ");
+        String[] right = nb.split(" ");
+        int common = 0;
+        for (String word : left) {
+            if (word.length() < 3) continue;
+            for (String other : right) {
+                if (word.equals(other)) { common++; break; }
+            }
+        }
+        int shorter = Math.min(left.length, right.length);
+        return shorter >= 3 && lengthRatio >= 0.30
+                && common / (double)shorter >= 0.50;
+    }
+
+    private double characterSimilarity(String a, String b) {
+        if (a == null || b == null) return 0.0;
+        int max = Math.max(a.length(), b.length());
+        if (max == 0) return 1.0;
+        if (Math.abs(a.length() - b.length()) > max * 0.45) return 0.0;
+        int[] previous = new int[b.length() + 1];
+        int[] current = new int[b.length() + 1];
+        for (int j = 0; j <= b.length(); j++) previous[j] = j;
+        for (int i = 1; i <= a.length(); i++) {
+            current[0] = i;
+            for (int j = 1; j <= b.length(); j++) {
+                int cost = a.charAt(i - 1) == b.charAt(j - 1) ? 0 : 1;
+                int deletion = previous[j] + 1;
+                int insertion = current[j - 1] + 1;
+                int substitution = previous[j - 1] + cost;
+                current[j] = Math.min(deletion, Math.min(insertion, substitution));
+            }
+            int[] swap = previous; previous = current; current = swap;
+        }
+        return 1.0 - previous[b.length()] / (double)max;
     }
 
     private String normalizeOcr(String value) {
