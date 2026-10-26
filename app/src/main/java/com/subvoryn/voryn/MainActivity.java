@@ -18,6 +18,9 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.inputmethod.InputMethodManager;
 import android.content.Context;
+import android.content.ContentValues;
+import android.os.Environment;
+import android.provider.MediaStore;
 import android.text.InputType;
 import android.widget.Button;
 import android.widget.ImageView;
@@ -227,7 +230,7 @@ public class MainActivity extends Activity {
         Button exportButton = button("Export subtitle file", true);
         exportButton.setId(10002);
         exportButton.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { chooseExport(); } });
-        convertCard.addView(exportButton, margin(-1, 11, 0, 0));
+        convertCard.addView(exportButton, margin(-1, dp(46), 0, 0));
         root.addView(convertCard, margin(-1, -2, 0, 12));
 
         LinearLayout positionCard = card();
@@ -275,7 +278,7 @@ public class MainActivity extends Activity {
         cuesCard.addView(text("Tap a cue to edit its text or timestamps.", 12, C_MUTED, false), margin(-1, -2, 0, 10));
         cueList = new LinearLayout(this);
         cueList.setOrientation(LinearLayout.VERTICAL);
-        cuesCard.addView(cueList, fullWidth());
+        cuesCard.addView(cueList, new LinearLayout.LayoutParams(-1, -2));
         root.addView(cuesCard, margin(-1, -2, 0, 12));
 
         LinearLayout ocrCard = card();
@@ -381,21 +384,87 @@ public class MainActivity extends Activity {
             toast("Pehle video se subtitles extract karo ya subtitle file import karo.");
             return;
         }
-        if (Build.VERSION.SDK_INT < 19) {
-            toast("Export requires Android 4.4 or newer (Storage Access Framework).");
-            return;
-        }
         String base = sourceName;
         int dot = base.lastIndexOf('.');
         if (dot > 0) base = base.substring(0, dot);
-        String ext = exportFormat == SubtitleEngine.FORMAT_SRT ? ".srt" : (exportFormat == SubtitleEngine.FORMAT_VTT ? ".vtt" : ".ass");
-        String mime = exportFormat == SubtitleEngine.FORMAT_VTT ? "text/vtt" : (exportFormat == SubtitleEngine.FORMAT_ASS ? "text/x-ssa" : "application/x-subrip");
+        if (base.length() == 0) base = "SubVoryn_export";
+        final String filename = base + extensionFor(exportFormat);
+        String mime = exportFormat == SubtitleEngine.FORMAT_VTT ? "text/vtt"
+                : (exportFormat == SubtitleEngine.FORMAT_ASS ? "text/x-ssa" : "application/x-subrip");
+
+        // Android 10+ saves directly to Download/SubVoryn without a folder picker.
+        if (Build.VERSION.SDK_INT >= 29) {
+            saveToDownloadsSubVoryn(filename, mime);
+            return;
+        }
+        // Older Android versions use the Storage Access Framework fallback.
+        if (Build.VERSION.SDK_INT < 19) {
+            toast("Export requires Android 4.4 or newer.");
+            return;
+        }
         Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType(mime);
-        intent.putExtra(Intent.EXTRA_TITLE, (base.length() == 0 ? "SubVoryn_export" : base) + ext);
+        intent.putExtra(Intent.EXTRA_TITLE, filename);
         try { startActivityForResult(intent, REQUEST_EXPORT); }
         catch (Exception e) { toast("Could not open export picker."); }
+    }
+
+    private void saveToDownloadsSubVoryn(String filename, String mime) {
+        Uri pendingUri = null;
+        try {
+            String output = SubtitleEngine.export(cues, exportFormat, selectedPosition);
+            String relativePath = Environment.DIRECTORY_DOWNLOADS + "/SubVoryn/";
+
+            ContentValues values = new ContentValues();
+            values.put(MediaStore.MediaColumns.DISPLAY_NAME, filename + ".pending");
+            values.put(MediaStore.MediaColumns.MIME_TYPE, mime);
+            values.put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath);
+            values.put(MediaStore.MediaColumns.IS_PENDING, 1);
+            pendingUri = getContentResolver().insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values);
+            if (pendingUri == null) throw new IOException("Android could not create the output file.");
+
+            OutputStream stream = getContentResolver().openOutputStream(pendingUri, "w");
+            if (stream == null) throw new IOException("Could not open the output file.");
+            try {
+                stream.write(output.getBytes("UTF-8"));
+                stream.flush();
+            } finally {
+                stream.close();
+            }
+
+            // Replace an older export only after the new file has been written successfully.
+            Cursor oldFiles = null;
+            try {
+                String selection = MediaStore.MediaColumns.DISPLAY_NAME + "=? AND "
+                        + MediaStore.MediaColumns.RELATIVE_PATH + "=?";
+                oldFiles = getContentResolver().query(MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                        new String[] {MediaStore.MediaColumns._ID},
+                        selection, new String[] {filename, relativePath}, null);
+                if (oldFiles != null) {
+                    while (oldFiles.moveToNext()) {
+                        long oldId = oldFiles.getLong(0);
+                        Uri oldUri = Uri.withAppendedPath(MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                                String.valueOf(oldId));
+                        getContentResolver().delete(oldUri, null, null);
+                    }
+                }
+            } finally {
+                if (oldFiles != null) oldFiles.close();
+            }
+
+            ContentValues publish = new ContentValues();
+            publish.put(MediaStore.MediaColumns.DISPLAY_NAME, filename);
+            publish.put(MediaStore.MediaColumns.IS_PENDING, 0);
+            int changed = getContentResolver().update(pendingUri, publish, null, null);
+            if (changed <= 0) throw new IOException("Could not finalize the saved subtitle file.");
+            toast("Saved: Download/SubVoryn/" + filename);
+        } catch (Exception e) {
+            if (pendingUri != null) {
+                try { getContentResolver().delete(pendingUri, null, null); } catch (Exception ignored) { }
+            }
+            toast("Export failed: " + safeMessage(e));
+        }
     }
 
     @Override
