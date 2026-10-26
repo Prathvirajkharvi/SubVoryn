@@ -1,0 +1,9 @@
+SubVoryn Beta V1.1 — Tesseract dependency fix
+
+Dependency changed to:
+com.github.adaptech-cz.Tesseract4Android:tesseract4android:4.9.0
+
+Keep JitPack in settings.gradle:
+maven { url = uri("https://jitpack.io") }
+
+If AIDE still reports TessBaseAPI unresolved, its Gradle/AAR integration may not be supported by your AIDE build. Use the included GitHub Actions workflow to build the APK, or share the new build error screenshot.

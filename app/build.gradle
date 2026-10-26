@@ -1,0 +1,36 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.subvoryn.voryn'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.subvoryn.voryn'
+        minSdk 21
+        targetSdk 29
+        versionCode 3
+        versionName '0.2.0-beta1'
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    buildTypes {
+        debug {
+            minifyEnabled false
+        }
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+}
+
+dependencies {
+    // On-device English OCR. The English traineddata is bundled in app/src/main/assets/tessdata.
+    implementation 'cz.adaptech.tesseract4android:tesseract4android:4.9.0'
+}
