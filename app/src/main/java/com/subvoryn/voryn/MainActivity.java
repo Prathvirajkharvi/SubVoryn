@@ -1207,8 +1207,8 @@ public class MainActivity extends Activity {
         for (String item : lines) {
             String line = item.replaceAll("[|¦·•_=~]+", " ")
                     .replaceAll("\\s+", " ").trim();
-            line = line.replaceAll("^[^\p{L}\p{N}]+", "")
-                    .replaceAll("[^\p{L}\p{N}!?.,'’\-]+$", "").trim();
+            line = line.replaceAll("^[^\\p{L}\\p{N}]+", "")
+                    .replaceAll("[^\\p{L}\\p{N}!?.,'’\\-]+$", "").trim();
             line = sanitizeSubtitleArtifacts(line);
             if (!isLikelySubtitleLine(line)) continue;
 
