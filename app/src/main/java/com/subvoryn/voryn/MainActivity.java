@@ -165,7 +165,7 @@ public class MainActivity extends Activity {
         videoPreview.setVisibility(View.GONE);
         videoCard.addView(videoPreview, margin(-1, dp(170), 0, 10));
         videoCard.addView(text("SCAN SPEED", 10, C_ACCENT, true), margin(-1, -2, 0, 4));
-        speedSpinner = spinner(new String[] {"Fast — sample every 1.2 seconds", "Balanced — sample every 0.6 seconds", "Accurate — sample every 0.3 seconds"});
+        speedSpinner = spinner(new String[] {"Quick Preview — sample every 0.6 seconds", "Balanced — sample every 0.3 seconds", "Accurate — sample every 0.1 seconds"});
         speedSpinner.setSelection(1);
         videoCard.addView(speedSpinner, margin(-1, dp(46), 0, 8));
         videoCard.addView(text("SUBTITLE AREA", 10, C_ACCENT, true), margin(-1, -2, 0, 4));
@@ -635,9 +635,9 @@ public class MainActivity extends Activity {
         final long duration = videoDurationMs;
         final int intervalMs;
         int speedChoice = speedSpinner == null ? 1 : speedSpinner.getSelectedItemPosition();
-        if (speedChoice == 0) intervalMs = 1200;
-        else if (speedChoice == 2) intervalMs = 300;
-        else intervalMs = 600;
+        if (speedChoice == 0) intervalMs = 600;
+        else if (speedChoice == 2) intervalMs = 100;
+        else intervalMs = 300;
         final int regionChoice = regionSpinner == null ? 0 : regionSpinner.getSelectedItemPosition();
         cancelScan = false;
         scanning = true;
@@ -649,6 +649,199 @@ public class MainActivity extends Activity {
             public void run() { runOcrWorker(selectedUri, duration, intervalMs, regionChoice); }
         }, "SubVoryn-OCR");
         scanThread.start();
+    }
+
+    // SUBVORYN_TEMPORAL_OCR_V4
+    // A dialogue begins only after stable observations. It ends when OCR sees a stable blank
+    // or a different stable dialogue. At 100 ms, this gives a boundary estimate of roughly +/- 50 ms.
+    private static final class OcrTimelineState {
+        SubtitleCue activeCue;
+        long lastActiveSampleMs = -1L;
+        long firstEmptySampleMs = -1L;
+        int emptySampleCount = 0;
+        String candidateText = "";
+        long candidateStartMs = -1L;
+        long candidateLastSampleMs = -1L;
+        int candidateSampleCount = 0;
+        ArrayList<String> candidateReadings = new ArrayList<String>();
+    }
+
+    private void clearOcrCandidate(OcrTimelineState state) {
+        state.candidateText = "";
+        state.candidateStartMs = -1L;
+        state.candidateLastSampleMs = -1L;
+        state.candidateSampleCount = 0;
+        state.candidateReadings.clear();
+    }
+
+    private boolean isUsableOcrDialogue(String text) {
+        if (text == null || text.trim().length() == 0) return false;
+        String flat = text.replace("\\N", " ").replace('\n', ' ').replace('\r', ' ').trim();
+        String normalized = normalizeOcrForMatch(flat);
+        if (normalized.length() < 3) return false;
+        String[] lines = text.replace("\\N", "\n").split("\n");
+        for (String line : lines) {
+            if (isLikelySubtitleLine(line.trim())) return true;
+        }
+        return false;
+    }
+
+    private boolean matchesOcrCueReadings(SubtitleCue cue,
+            java.util.IdentityHashMap<SubtitleCue, ArrayList<String>> readingsByCue,
+            String incoming) {
+        if (cue == null || incoming == null) return false;
+        if (areSimilarOcrTexts(cue.text, incoming)) return true;
+        ArrayList<String> readings = readingsByCue == null ? null : readingsByCue.get(cue);
+        if (readings != null) {
+            for (String old : readings) {
+                if (areSimilarOcrTexts(old, incoming)) return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean matchesCandidateReadings(OcrTimelineState state, String incoming) {
+        if (state.candidateText.length() > 0 && areSimilarOcrTexts(state.candidateText, incoming)) return true;
+        for (String old : state.candidateReadings) {
+            if (areSimilarOcrTexts(old, incoming)) return true;
+        }
+        return false;
+    }
+
+    private long midpointMs(long a, long b) {
+        if (a < 0L) return Math.max(0L, b);
+        if (b < 0L) return Math.max(0L, a);
+        return a + (b - a) / 2L;
+    }
+
+    private void applyConsensusToCue(SubtitleCue cue,
+            java.util.IdentityHashMap<SubtitleCue, ArrayList<String>> readingsByCue) {
+        if (cue == null || readingsByCue == null) return;
+        ArrayList<String> readings = readingsByCue.get(cue);
+        if (readings == null || readings.size() == 0) return;
+        String consensus = buildConsensusOcrText(readings);
+        if (consensus.length() > 0) {
+            cue.text = consensus;
+            cue.rawText = consensus;
+        }
+    }
+
+    private void applyConsensusToOcrCues(List<SubtitleCue> cues,
+            java.util.IdentityHashMap<SubtitleCue, ArrayList<String>> readingsByCue) {
+        if (cues == null) return;
+        for (SubtitleCue cue : cues) applyConsensusToCue(cue, readingsByCue);
+    }
+
+    private void processOcrSample(List<SubtitleCue> found,
+            java.util.IdentityHashMap<SubtitleCue, ArrayList<String>> readingsByCue,
+            OcrTimelineState state, String rawText, long sampleMs,
+            int intervalMs, long durationMs) {
+        String text = rawText == null ? "" : rawText.trim();
+        if (!isUsableOcrDialogue(text)) {
+            clearOcrCandidate(state);
+            if (state.activeCue != null) {
+                if (state.emptySampleCount == 0) state.firstEmptySampleMs = sampleMs;
+                state.emptySampleCount++;
+                int requiredBlankSamples = intervalMs <= 300 ? 2 : 1;
+                if (state.emptySampleCount >= requiredBlankSamples) {
+                    long end = midpointMs(state.lastActiveSampleMs, state.firstEmptySampleMs);
+                    long minimumEnd = state.activeCue.startMs + Math.max(50L, Math.min(180L, intervalMs / 2L));
+                    if (end < minimumEnd) end = minimumEnd;
+                    state.activeCue.endMs = Math.min(durationMs, end);
+                    state.activeCue = null;
+                    state.lastActiveSampleMs = -1L;
+                    state.firstEmptySampleMs = -1L;
+                    state.emptySampleCount = 0;
+                }
+            }
+            return;
+        }
+
+        state.emptySampleCount = 0;
+        state.firstEmptySampleMs = -1L;
+
+        if (state.activeCue != null && matchesOcrCueReadings(state.activeCue, readingsByCue, text)) {
+            addOcrReading(readingsByCue, state.activeCue, text);
+            applyConsensusToCue(state.activeCue, readingsByCue);
+            state.activeCue.endMs = Math.min(durationMs, sampleMs + Math.max(40L, intervalMs / 2L));
+            state.lastActiveSampleMs = sampleMs;
+            clearOcrCandidate(state);
+            return;
+        }
+
+        long candidateWindowMs = Math.max(350L, intervalMs * 3L);
+        boolean candidateIsRecent = state.candidateStartMs >= 0L
+                && sampleMs - state.candidateLastSampleMs <= candidateWindowMs;
+        if (!candidateIsRecent || !matchesCandidateReadings(state, text)) {
+            clearOcrCandidate(state);
+            state.candidateText = text;
+            state.candidateStartMs = sampleMs;
+            state.candidateLastSampleMs = sampleMs;
+            state.candidateSampleCount = 1;
+            state.candidateReadings.add(text);
+        } else {
+            state.candidateLastSampleMs = sampleMs;
+            state.candidateSampleCount++;
+            boolean exists = false;
+            String key = normalizeOcrForMatch(text);
+            for (String old : state.candidateReadings) {
+                if (normalizeOcrForMatch(old).equals(key)) { exists = true; break; }
+            }
+            if (!exists && state.candidateReadings.size() < 12) state.candidateReadings.add(text);
+            if (subtitleTextQuality(text) > subtitleTextQuality(state.candidateText)) state.candidateText = text;
+        }
+
+        // Fast preview accepts one sample; Balanced/Accurate require repeated evidence.
+        int requiredSamples = intervalMs <= 300 ? 2 : 1;
+        if (state.candidateSampleCount < requiredSamples) return;
+
+        long cueStart = Math.max(0L, state.candidateStartMs - intervalMs / 2L);
+        if (state.activeCue != null) {
+            long boundary = midpointMs(state.lastActiveSampleMs, state.candidateStartMs);
+            long minBoundary = state.activeCue.startMs + Math.max(50L, Math.min(180L, intervalMs / 2L));
+            if (boundary < minBoundary) boundary = minBoundary;
+            if (boundary > state.candidateStartMs) boundary = state.candidateStartMs;
+            if (boundary < state.activeCue.startMs) boundary = state.activeCue.startMs;
+            state.activeCue.endMs = Math.min(durationMs, boundary);
+            cueStart = state.activeCue.endMs;
+            state.activeCue = null;
+        }
+
+        String consensus = buildConsensusOcrText(state.candidateReadings);
+        if (consensus.length() == 0) consensus = state.candidateText;
+        long cueEnd = Math.min(durationMs, sampleMs + Math.max(40L, intervalMs / 2L));
+        if (cueEnd <= cueStart) cueEnd = Math.min(durationMs, cueStart + Math.max(80L, intervalMs));
+        if (cueEnd <= cueStart) {
+            clearOcrCandidate(state);
+            state.lastActiveSampleMs = -1L;
+            return;
+        }
+
+        SubtitleCue cue = new SubtitleCue(cueStart, cueEnd, consensus);
+        cue.rawText = consensus;
+        cue.text = consensus;
+        cue.alignment = 2;
+        cue.marginV = 25;
+        found.add(cue);
+        readingsByCue.put(cue, new ArrayList<String>());
+        for (String reading : state.candidateReadings) addOcrReading(readingsByCue, cue, reading);
+        state.activeCue = cue;
+        state.lastActiveSampleMs = sampleMs;
+        clearOcrCandidate(state);
+    }
+
+    private void finishOcrTimeline(List<SubtitleCue> found,
+            java.util.IdentityHashMap<SubtitleCue, ArrayList<String>> readingsByCue,
+            OcrTimelineState state, long durationMs, int intervalMs) {
+        if (state.activeCue != null) {
+            long end = state.lastActiveSampleMs < 0L ? state.activeCue.endMs
+                    : Math.min(durationMs, state.lastActiveSampleMs + Math.max(40L, intervalMs / 2L));
+            if (end <= state.activeCue.startMs) end = Math.min(durationMs, state.activeCue.startMs + Math.max(80L, intervalMs));
+            state.activeCue.endMs = Math.min(durationMs, end);
+        }
+        applyConsensusToOcrCues(found, readingsByCue);
+        state.activeCue = null;
+        clearOcrCandidate(state);
     }
 
     private void runOcrWorker(Uri selectedUri, long duration, int intervalMs, int regionChoice) {
@@ -681,8 +874,7 @@ public class MainActivity extends Activity {
             final long actualDuration = actualDurationValue;
             long lastFingerprint = Long.MIN_VALUE;
             String cachedText = "";
-            String activeNorm = "";
-            long lastDetectedAt = -1L;
+            OcrTimelineState timeline = new OcrTimelineState();
             for (long t = 0L; t < actualDuration; t += intervalMs) {
                 if (cancelScan) { stopped = true; break; }
                 Bitmap frame = null;
@@ -701,31 +893,7 @@ public class MainActivity extends Activity {
                             lastFingerprint = fingerprint;
                             cachedText = recognized;
                         }
-                        String normalized = normalizeOcr(recognized);
-                        if (recognized.length() > 0 && normalized.length() > 1) {
-                            if (found.size() > 0 && lastDetectedAt >= 0L && t - lastDetectedAt <= (long)(intervalMs * 2.1) && (normalized.equals(activeNorm) || areSimilarOcrTexts(found.get(found.size() - 1).text, recognized))) {
-                                SubtitleCue active = found.get(found.size() - 1);
-                                addOcrReading(cueReadings, active, recognized);
-                                active.endMs = Math.min(actualDuration, t + Math.max(100L, intervalMs / 2L));
-                                if (recognized.length() < 180 && subtitleTextQuality(recognized) > subtitleTextQuality(active.text)) {
-                                    active.text = recognized;
-                                    active.rawText = recognized;
-                                }
-                            } else {
-                                long end = Math.min(actualDuration, t + Math.max(100L, intervalMs / 2L));
-                                if (end <= t) end = Math.min(actualDuration, t + 100L);
-                                SubtitleCue cue = new SubtitleCue(Math.max(0L, t - intervalMs / 2L), end, recognized);
-                                cue.rawText = recognized;
-                                cue.text = recognized;
-                                cue.alignment = 2;
-                                cue.marginV = 25;
-                                found.add(cue);
-                                cueReadings.put(cue, new ArrayList<String>());
-                                addOcrReading(cueReadings, cue, recognized);
-                            }
-                            activeNorm = normalized;
-                            lastDetectedAt = t;
-                        }
+                        processOcrSample(found, cueReadings, timeline, recognized, t, intervalMs, actualDuration);
                     }
                 } finally {
                     if (crop != null && crop != frame && !crop.isRecycled()) crop.recycle();
@@ -742,8 +910,9 @@ public class MainActivity extends Activity {
                     lastUiUpdate = t;
                 }
             }
-            mergeSimilarOcrCues(found, cueReadings, Math.max(350L, intervalMs));
-            SubtitleEngine.mergeConsecutiveDuplicates(found, intervalMs * 2L);
+            finishOcrTimeline(found, cueReadings, timeline, actualDuration, intervalMs);
+            applyConsensusToOcrCues(found, cueReadings);
+            SubtitleEngine.mergeConsecutiveDuplicates(found, Math.max(100L, intervalMs / 2L));
             stabilizeOcrCueTimings(found, actualDuration, intervalMs);
         } catch (Throwable e) {
             error = safeThrowable(e);
@@ -1360,8 +1529,7 @@ public class MainActivity extends Activity {
         String ca = na.replace(" ", "");
         String cb = nb.replace(" ", "");
         double lengthRatio = Math.min(ca.length(), cb.length()) / (double)Math.max(ca.length(), cb.length());
-        // Fuzzy character match is reserved for text with similar overall length.
-        if (lengthRatio >= 0.68d && characterSimilarity(ca, cb) >= 0.76d) return true;
+        if (lengthRatio >= 0.68d && characterSimilarity(ca, cb) >= 0.78d) return true;
 
         String[] left = meaningfulOcrWords(na);
         String[] right = meaningfulOcrWords(nb);
@@ -1369,16 +1537,17 @@ public class MainActivity extends Activity {
         int common = 0;
         for (String word : left) {
             for (String other : right) {
-                if (word.equals(other) || wordSimilarity(word, other) >= 0.86d) {
-                    common++;
-                    break;
-                }
+                if (word.equals(other) || wordSimilarity(word, other) >= 0.87d) { common++; break; }
             }
         }
-        int denominator = Math.min(left.length, right.length);
-        // Require at least 3 content words, avoiding merges based only on a shared phrase.
-        return common >= 3 && denominator > 0 && common / (double)denominator >= 0.58d;
+        int maxWords = Math.max(left.length, right.length);
+        int minWords = Math.min(left.length, right.length);
+        double coverageOfLonger = maxWords == 0 ? 0.0d : common / (double)maxWords;
+        // Require broad phrase agreement; shared object names alone must not merge two lines.
+        return (common >= 3 && coverageOfLonger >= 0.52d)
+                || (common >= 2 && minWords <= 3 && coverageOfLonger >= 0.70d);
     }
+
 
     private boolean areTemporallySimilarOcrTexts(String a, String b, long overlapMs, long minimumDurationMs) {
         if (overlapMs <= 0L || minimumDurationMs <= 0L) return false;
