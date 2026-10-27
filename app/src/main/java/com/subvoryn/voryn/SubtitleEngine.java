@@ -81,6 +81,9 @@ public final class SubtitleEngine {
     private static List<SubtitleCue> parseAss(String content) {
         List<SubtitleCue> result = new ArrayList<SubtitleCue>();
         Map<String, Integer> styleAlignments = new HashMap<String, Integer>();
+        String lower = content.toLowerCase(Locale.US);
+        int eventsIndex = lower.indexOf("[events]");
+        String header = eventsIndex >= 0 ? content.substring(0, eventsIndex).trim() : "";
         String section = "";
         String[] lines = content.split("\\n");
         List<String> eventFormat = null;
@@ -107,11 +110,9 @@ public final class SubtitleEngine {
                     eventFormat = splitFormat(line.substring(7));
                 } else if (line.regionMatches(true, 0, "Dialogue:", 0, 9) && eventFormat != null) {
                     String[] values = splitCsv(line.substring(9), eventFormat.size());
-                    String startText = getField(values, eventFormat, "Start", "");
-                    String endText = getField(values, eventFormat, "End", "");
-                    long start = parseAssTimestamp(startText);
-                    long end = parseAssTimestamp(endText);
-                    if (start < 0 || end <= start) continue;
+                    long start = parseAssTimestamp(getField(values, eventFormat, "Start", ""));
+                    long end = parseAssTimestamp(getField(values, eventFormat, "End", ""));
+                    if (start < 0L || end <= start) continue;
                     String raw = getField(values, eventFormat, "Text", "");
                     if (raw.trim().length() == 0) continue;
                     String style = getField(values, eventFormat, "Style", "Default");
@@ -119,6 +120,11 @@ public final class SubtitleEngine {
                     cue.rawText = raw;
                     cue.text = raw;
                     cue.style = style;
+                    cue.assHeader = header;
+                    cue.assName = getField(values, eventFormat, "Name", "");
+                    cue.assEffect = getField(values, eventFormat, "Effect", "");
+                    cue.marginL = parseInt(getField(values, eventFormat, "MarginL", "0"), 0);
+                    cue.marginR = parseInt(getField(values, eventFormat, "MarginR", "0"), 0);
                     cue.marginV = parseInt(getField(values, eventFormat, "MarginV", "25"), 25);
                     cue.layer = parseInt(getField(values, eventFormat, "Layer", getField(values, eventFormat, "Marked", "0")), 0);
                     Matcher am = ASS_ALIGNMENT.matcher(raw);
@@ -337,12 +343,25 @@ public final class SubtitleEngine {
 
     private static String exportAss(List<SubtitleCue> cues, int position) {
         StringBuilder out = new StringBuilder();
-        out.append("[Script Info]\nScriptType: v4.00+\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n");
-        out.append("[V4+ Styles]\n");
-        out.append("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n");
-        out.append("Style: Default,Arial,42,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,2,0,2,20,20,25,1\n\n");
+        String originalHeader = "";
+        if (cues != null) {
+            for (SubtitleCue cue : cues) {
+                if (cue != null && cue.assHeader != null && cue.assHeader.trim().length() > 0) {
+                    originalHeader = cue.assHeader.trim();
+                    break;
+                }
+            }
+        }
+        if (originalHeader.length() > 0) {
+            out.append(originalHeader).append("\n\n");
+        } else {
+            out.append("[Script Info]\nScriptType: v4.00+\nWrapStyle: 0\nScaledBorderAndShadow: yes\n\n");
+            out.append("[V4+ Styles]\n");
+            out.append("Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n");
+            out.append("Style: Default,Arial,42,&H00FFFFFF,&H000000FF,&H00000000,&H64000000,0,0,0,0,100,100,0,0,1,2,0,2,20,20,25,1\n\n");
+        }
         out.append("[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n");
-        for (int i = 0; i < cues.size(); i++) {
+        for (int i = 0; cues != null && i < cues.size(); i++) {
             SubtitleCue c = cues.get(i);
             if (displayText(c).length() == 0 || c.endMs <= c.startMs) continue;
             int alignment = c.alignment >= 1 && c.alignment <= 9 ? c.alignment : 2;
@@ -359,12 +378,17 @@ public final class SubtitleEngine {
                 if (raw.indexOf('\n') >= 0) raw = raw.replace("\n", "\\N");
             }
             int marginV = position == POSITION_ORIGINAL ? Math.max(0, c.marginV) : 25;
+            String style = c.style == null || c.style.trim().length() == 0 ? "Default" : c.style;
+            String name = c.assName == null ? "" : c.assName;
+            String effect = c.assEffect == null ? "" : c.assEffect;
+            int marginL = Math.max(0, c.marginL);
+            int marginR = Math.max(0, c.marginR);
             out.append("Dialogue: ").append(Math.max(0, c.layer)).append(',').append(formatAssTime(c.startMs)).append(',').append(formatAssTime(c.endMs))
-                .append(",Default,,0,0,").append(marginV).append(",,").append(raw.replace('\r', ' ')).append('\n');
+                .append(',').append(style).append(',').append(name).append(',').append(marginL).append(',').append(marginR).append(',').append(marginV)
+                .append(',').append(effect).append(',').append(raw.replace('\r', ' ')).append('\n');
         }
         return out.toString();
     }
-
 
     private static String stripAssPositionOverrides(String raw) {
         if (raw == null) return "";

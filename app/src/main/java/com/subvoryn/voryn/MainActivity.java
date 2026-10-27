@@ -97,6 +97,9 @@ public class MainActivity extends Activity {
     private int exportFormat = SubtitleEngine.FORMAT_SRT;
     private boolean imported = false;
     private boolean showAllCues = false;
+    private ArrayList<SubtitleCue> undoCues;
+    private String undoLabel = "";
+    private Button undoCleanupButton;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -254,6 +257,10 @@ public class MainActivity extends Activity {
         qcCard.addView(text("QUALITY CONTROL & SMART CLEANUP", 10, C_ACCENT, true), margin(-1, -2, 0, 7));
         qcText = text("Import a file to run quality checks.", 12, C_MUTED, false);
         qcCard.addView(qcText, margin(-1, -2, 0, 12));
+        undoCleanupButton = button("Undo last cleanup", false);
+        undoCleanupButton.setEnabled(false);
+        undoCleanupButton.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { undoLastCleanup(); } });
+        qcCard.addView(undoCleanupButton, margin(-1, dp(44), 0, 8));
         // SUBVORYN_OCR_ARTIFACT_CLEANUP_V5
         Button cleanTextButton = button("Clean OCR spelling & stray brackets", true);
         cleanTextButton.setOnClickListener(new View.OnClickListener() {
@@ -298,7 +305,33 @@ public class MainActivity extends Activity {
         ocrCard.addView(text("This beta uses the bundled English Tesseract OCR model as the first on-device extraction engine. It does not upload your video. Use the subtitle-area control to reduce credits/signage being detected. PaddleOCR can be evaluated as a later engine option.", 12, C_MUTED, false));
         root.addView(ocrCard, margin(-1, -2, 0, 8));
 
-        setContentView(scroll);
+        LinearLayout appShell = new LinearLayout(this);
+        appShell.setOrientation(LinearLayout.VERTICAL);
+        appShell.setBackgroundColor(C_BG);
+        appShell.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1f));
+        appShell.addView(buildBottomNavigation(0), new LinearLayout.LayoutParams(-1, dp(60)));
+        setContentView(appShell);
+    }
+
+    private LinearLayout buildBottomNavigation(int active) {
+        LinearLayout nav = new LinearLayout(this);
+        nav.setGravity(Gravity.CENTER);
+        nav.setBackgroundColor(C_PANEL);
+        String[] labels = new String[] {"Home", "Encoding", "Settings"};
+        for (int i = 0; i < labels.length; i++) {
+            final int index = i;
+            Button item = button(labels[i], i == active);
+            item.setTextSize(12);
+            item.setMinHeight(0); item.setMinimumHeight(0);
+            item.setOnClickListener(new View.OnClickListener() { public void onClick(View v) {
+                if (index == 1) startActivity(new Intent(MainActivity.this, EncodingActivity.class).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
+                else if (index == 2) startActivity(new Intent(MainActivity.this, SettingsActivity.class).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
+            }});
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(46), 1f);
+            lp.leftMargin = dp(5); lp.rightMargin = dp(5); nav.addView(item, lp);
+        }
+        nav.setPadding(dp(5), dp(5), dp(5), dp(5));
+        return nav;
     }
 
     private void addPositionChoice(RadioGroup group, String label, int position) {
@@ -513,6 +546,8 @@ public class MainActivity extends Activity {
                 return;
             }
             cues = parsed;
+            undoCues = null;
+            if (undoCleanupButton != null) undoCleanupButton.setEnabled(false);
             sourceName = name == null ? "Imported subtitle" : name;
             sourceFormat = format;
             imported = true;
@@ -686,14 +721,11 @@ public class MainActivity extends Activity {
     }
 
     private boolean isUsableOcrDialogue(String text) {
-        if (text == null || text.trim().length() == 0) return false;
-        String flat = text.replace("\\N", " ").replace('\n', ' ').replace('\r', ' ').trim();
-        String normalized = normalizeOcrForMatch(flat);
-        if (normalized.length() < 3) return false;
-        String[] lines = text.replace("\\N", "\n").split("\n");
-        for (String line : lines) {
-            if (isLikelySubtitleLine(line.trim())) return true;
-        }
+        if (text == null) return false;
+        String cleaned = OcrTextCleaner.clean(text);
+        if (cleaned.length() == 0 || OcrTextCleaner.isNoiseOnly(cleaned)) return false;
+        String[] lines = cleaned.replace("\\N", "\n").split("\n");
+        for (String line : lines) if (isLikelySubtitleLine(line.trim())) return true;
         return false;
     }
 
@@ -960,6 +992,8 @@ public class MainActivity extends Activity {
                 }
                 cues.clear();
                 cues.addAll(result);
+                undoCues = null;
+                if (undoCleanupButton != null) undoCleanupButton.setEnabled(false);
                 sourceName = baseName(videoName) + ".srt";
                 sourceFormat = SubtitleEngine.FORMAT_SRT;
                 exportFormat = SubtitleEngine.FORMAT_SRT;
@@ -1137,65 +1171,10 @@ public class MainActivity extends Activity {
 
     // SUBVORYN_OCR_ARTIFACT_CLEANUP_V5
     /** Conservative text-only cleanup. It does not alter cue times or ASS positioning tags. */
+    // SUBVORYN_OCR_ARTIFACT_CLEANUP_V6
+    /** Conservative OCR cleanup; cue timing and ASS metadata are handled separately. */
     private String sanitizeSubtitleArtifacts(String input) {
-        if (input == null) return "";
-        String value = input.replace('\r', ' ').replace('\t', ' ').replace("\\taaqatwar", " taaqatwar");
-        // Parentheses with mismatched counts are almost always OCR debris in the supplied samples.
-        int opens = 0, closes = 0;
-        for (int i = 0; i < value.length(); i++) {
-            if (value.charAt(i) == '(') opens++;
-            else if (value.charAt(i) == ')') closes++;
-        }
-        if (opens != closes) {
-            value = value.replace('(', ' ').replace(')', ' ');
-        } else {
-            value = value.replaceAll("\\(\\s*\\)", " ");
-        }
-        // Also fix an OCR parenthesis inserted between two words, including adjacent forms like word)next.
-        value = value.replaceAll("(?<=\\p{L})\\)(?=\\s*\\p{L})", " ")
-                .replaceAll("(?<=\\p{L})\\((?=\\s*\\p{L})", " ");
-        // Curly quote between letters is commonly read instead of a space (e.g. Kitna’bada).
-        value = value.replaceAll("(?<=\\p{L})[‘’](?=\\p{L})", " ")
-                .replace("“", "").replace("”", "").replace("‘", "").replace("’", "");
-        // Small, evidence-based repairs from the sample. These normalize OCR joins, not story meaning.
-        value = value.replaceAll("(?i)\\bkitna\\s*['’]?\\s*bada\\b", "Kitna bada")
-                .replaceAll("(?i)\\bmagic\\s*['’]?\\s*stone\\b", "magic stone")
-                .replaceAll("(?i)\\bmagicj?stone\\b", "magic stone")
-                .replaceAll("(?i)\\bhilagbhag\\b", "hi lagbhag")
-                .replaceAll("(?i)\\bbhiy\\b", "bhi")
-                .replaceAll("(?i)^\\s*(?:[a-z]{1,2}\\d+|\\d+[a-z]{1,2}|[a-z]{1,2})\\s+(?=(?:sirf|high[- ]level|g-gajab)\\b)", "")
-                .replaceAll("(?i)\\bhigh\\s*[-; ]\\s*level\\s*/\\s*adventurers\\b", "High-level adventurers")
-                .replaceAll("(?i)\\bhigh;level\\b", "High-level")
-                .replaceAll("(?i)\\btohisse\\b", "toh isse")
-                .replaceAll("(?i)\\bkartej?hain\\b", "karte hain")
-                .replaceAll("(?i)\\bshikaarjkarte\\b", "shikaar karte")
-                .replaceAll("(?i)\\bzyadaj\\b", "zyada")
-                .replaceAll("(?i)\\bone\\s+sters\\b", "monsters")
-                .replaceAll("(?i)\\bmonsters\\s*kalshikaar\\b", "monsters ka shikaar")
-                .replaceAll("(?i)^\\s*lakh[,;:]?\\s+(?=high[- ]level\\b)", "")
-                .replaceAll("(?i)^\\s*asa\\.\\s+(?=high[- ]level\\b)", "");
-        // Strip repeated stray punctuation, but keep normal commas in numbers such as 2,000,000.
-        value = value.replaceAll("([!?]){2,}", "$1")
-                .replaceAll("([;]){2,}", ";")
-                .replaceAll("\\s+([.!?;])", "$1")
-                .replaceAll("([!?])(?=\\p{L})", "$1 ")
-                .replaceAll("[ \\t]{2,}", " ").trim();
-        // If OCR appends a few short, unknown tokens after a finished sentence, drop only that suspicious tail.
-        java.util.regex.Matcher tail = java.util.regex.Pattern
-                .compile("([.!?])\\s+([\\p{L}\\p{N}]+(?:\\s+[\\p{L}\\p{N}]+){0,2})$")
-                .matcher(value);
-        if (tail.find()) {
-            String suffix = tail.group(2).trim();
-            String[] tailWords = suffix.split("\\s+");
-            boolean shortUnknownTail = tailWords.length <= 3 && suffix.length() <= 14;
-            String knownTail = " no yes ok okay oh hi hey wow hai hain ho na haan nahi what why how who you me my we they he she it is are was were the a an and but so go come look wait stop help sir ";
-            for (String tailWord : tailWords) {
-                String token = tailWord.toLowerCase(Locale.US).replaceAll("[^\\p{L}\\p{N}]", "");
-                if (token.length() > 4 || knownTail.contains(" " + token + " ")) shortUnknownTail = false;
-            }
-            if (shortUnknownTail) value = value.substring(0, tail.start(2)).trim();
-        }
-        return value;
+        return OcrTextCleaner.clean(input);
     }
 
     private String cleanOcrText(String raw) {
@@ -1261,34 +1240,23 @@ public class MainActivity extends Activity {
     }
 
     private boolean isLikelySubtitleLine(String line) {
-        if (line == null || line.length() < 3 || line.length() > 110) return false;
-        String norm = normalizeOcr(line);
-        if (norm.length() < 3) return false;
-
+        if (line == null) return false;
+        String value = OcrTextCleaner.clean(line);
+        if (value.length() == 0 || value.length() > 110 || OcrTextCleaner.isNoiseOnly(value)) return false;
+        String norm = normalizeOcrForMatch(value);
+        if (norm.length() < 2) return false;
         int visible = 0, alnum = 0;
-        for (int i = 0; i < line.length(); i++) {
-            char ch = line.charAt(i);
+        for (int i = 0; i < value.length(); i++) {
+            char ch = value.charAt(i);
             if (!Character.isWhitespace(ch)) visible++;
             if (Character.isLetterOrDigit(ch)) alnum++;
         }
-        if (visible == 0 || alnum / (double) visible < 0.62) return false;
-
+        if (visible == 0 || alnum == 0 || alnum / (double) visible < 0.45d) return false;
         String[] words = norm.split(" ");
-        if (words.length == 2 && norm.length() <= 9 && !hasKnownShortDialogueWord(words)) return false;
         if (words.length > 15) return false;
-        int shortWords = 0, longWords = 0, anchoredWords = 0;
-        String common = " the and you he she we they it is are was were be do did have has to of or but if what when where why how not yes no this that with for from in on at my your me us can will just so hai hain ho na bhi toh to main mein tum mujhe ye woh ek nahi kya ka ki ke ko se sirf magic stone hi lagbhag gold gajab kitna bada zyada taaqatwar monsters shikaar karte adventurers high level isse bhi chahiye chahiye tha thi hain hain kya kyun kaisa kaisi kitne kitni hoga hogi kar raha rahi rahe abhi yahan wahan mujhe tumhe unhe unka unki unke sab koi kaun agar lekin phir bahut bilkul andar bahar paise rupaye ghar naam dekho suno achha achhi accha arre arey haan nahi hain hai ji ji haan okay well right sir all only because just now then than there their gold stone magic";
-        for (String word : words) {
-            if (word.matches("[0-9]+")) continue;
-            if (word.length() <= 2) shortWords++;
-            if (word.length() >= 3) longWords++;
-            if (common.contains(" " + word + " ") || common.startsWith(word + " ") || common.endsWith(" " + word)) anchoredWords++;
-            if (word.length() > 18) return false;
-        }
-        if (words.length >= 5 && shortWords / (double) words.length > 0.58) return false;
-        if (words.length >= 5 && longWords < 2) return false;
-        if (words.length == 1 && norm.length() < 4) return false;
-        if (anchoredWords == 0 && (norm.length() < 22 || longWords < 3)) return false;
+        for (String word : words) if (word.length() > 28) return false;
+        // Keep short real lines such as "No!", "Oh?", "Go." and "I"; no dictionary gate.
+        if (words.length == 1 && norm.length() == 1 && !norm.matches("(?i)[ia]")) return false;
         return true;
     }
 
@@ -1572,34 +1540,7 @@ public class MainActivity extends Activity {
     }
 
     private String stripOcrEdgeArtifacts(String text) {
-        if (text == null) return "";
-        String value = text.replace("\\N", " ").replace('\n', ' ').replace('\r', ' ')
-                .replace("‘", "").replace("“", "").replace("”", "")
-                .replaceAll("[{}|¦]+", " ").replaceAll("\\s+", " ").trim();
-        // On the supplied anime sample, this short prefix is clearly a visual/OCR artifact before the real sentence.
-        value = value.replaceFirst("(?i)^asa\\.\\s+(?=high[- ]level\\b)", "");
-        String common = " please wait look look at stop hey hey there okay well right all no yes oh hi the and you he she we they it is am are was were be do did have has to of or but if what when where why how not this that with for from in on at my your me us can will just so hai hain ho na bhi toh to main mein tum mujhe ye woh ek nahi kya ka ki ke ko se sirf magic stone hi lagbhag gold gajab kitna bada zyada taaqatwar monsters shikaar karte adventurers high level isse ";
-        String[] words = value.split("\\s+");
-        while (words.length >= 3) {
-            String last = words[words.length - 1];
-            String previous = words[words.length - 2];
-            String norm = normalizeOcrWord(last);
-            boolean previousEndsSentence = previous.matches(".*[!?]$" );
-            boolean lastHasPunctuation = last.matches(".*[.!?]$");
-            boolean known = common.contains(" " + norm + " ") || common.startsWith(norm + " ") || common.endsWith(" " + norm);
-            if (previousEndsSentence && !lastHasPunctuation && norm.length() >= 2 && norm.length() <= 9 && !known) {
-                String[] shorter = new String[words.length - 1];
-                System.arraycopy(words, 0, shorter, 0, shorter.length);
-                words = shorter;
-            } else break;
-        }
-        StringBuilder out = new StringBuilder();
-        for (String word : words) {
-            if (word.length() == 0) continue;
-            if (out.length() > 0) out.append(' ');
-            out.append(word);
-        }
-        return sanitizeSubtitleArtifacts(out.toString().trim());
+        return OcrTextCleaner.clean(text);
     }
 
     private boolean areSimilarOcrTexts(String a, String b) {
@@ -1868,6 +1809,7 @@ public class MainActivity extends Activity {
                             toast("Check the timestamps and dialogue. End must be after start.");
                             return;
                         }
+                        captureUndoSnapshot("cue edit");
                         cue.startMs = newStart; cue.endMs = newEnd; cue.text = newText; cue.rawText = newText;
                         sortCues();
                         dialog.dismiss();
@@ -1878,7 +1820,7 @@ public class MainActivity extends Activity {
                     public void onClick(View v) {
                         new AlertDialog.Builder(MainActivity.this).setTitle("Delete cue?").setMessage("This dialogue will be removed from the current project.")
                             .setNegativeButton("Keep", null).setPositiveButton("Delete", new android.content.DialogInterface.OnClickListener() {
-                                public void onClick(android.content.DialogInterface d, int w) { cues.remove(index); dialog.dismiss(); refreshScreen(); }
+                                public void onClick(android.content.DialogInterface d, int w) { captureUndoSnapshot("cue delete"); cues.remove(index); dialog.dismiss(); refreshScreen(); }
                             }).show();
                     }
                 });
@@ -1919,9 +1861,9 @@ public class MainActivity extends Activity {
             if (gap <= maxGapMs) {
                 String previousVisible = sanitizeSubtitleArtifacts(SubtitleEngine.displayText(previous));
                 String currentVisible = sanitizeSubtitleArtifacts(SubtitleEngine.displayText(current));
-                if (areSimilarOcrTexts(previousVisible, currentVisible)) {
-                    String previousRaw = sanitizeSubtitleArtifacts(previous.rawText == null ? previous.text : previous.rawText);
-                    String currentRaw = sanitizeSubtitleArtifacts(current.rawText == null ? current.text : current.rawText);
+                if (areConservativelySameDialogue(previousVisible, currentVisible)) {
+                    String previousRaw = cleanCuePreservingFormatting(previous.rawText == null ? previous.text : previous.rawText);
+                    String currentRaw = cleanCuePreservingFormatting(current.rawText == null ? current.text : current.rawText);
                     boolean useCurrent = subtitleTextQuality(currentVisible) > subtitleTextQuality(previousVisible);
                     if (useCurrent) {
                         previous.text = currentRaw;
@@ -1942,13 +1884,74 @@ public class MainActivity extends Activity {
         return merged;
     }
 
+    private void captureUndoSnapshot(String label) {
+        undoCues = new ArrayList<SubtitleCue>();
+        for (SubtitleCue cue : cues) {
+            SubtitleCue copy = new SubtitleCue(cue.startMs, cue.endMs, cue.text);
+            copy.rawText = cue.rawText; copy.style = cue.style; copy.layer = cue.layer;
+            copy.alignment = cue.alignment; copy.marginV = cue.marginV;
+            copy.assHeader = cue.assHeader; copy.assName = cue.assName; copy.assEffect = cue.assEffect;
+            copy.marginL = cue.marginL; copy.marginR = cue.marginR;
+            undoCues.add(copy);
+        }
+        undoLabel = label == null ? "cleanup" : label;
+        if (undoCleanupButton != null) undoCleanupButton.setEnabled(true);
+    }
+
+    private void undoLastCleanup() {
+        if (undoCues == null) { toast("There is no cleanup change to undo."); return; }
+        cues = new ArrayList<SubtitleCue>(undoCues);
+        undoCues = null;
+        if (undoCleanupButton != null) undoCleanupButton.setEnabled(false);
+        refreshScreen();
+        toast("Undid " + undoLabel + ".");
+        undoLabel = "";
+    }
+
+    /** Clean plain dialogue while preserving ASS override blocks and explicit line-break/space tags. */
+    private String cleanCuePreservingFormatting(String input) {
+        if (input == null) return "";
+        if (sourceFormat != SubtitleEngine.FORMAT_ASS) return OcrTextCleaner.clean(input);
+        java.util.regex.Pattern protectedPattern = java.util.regex.Pattern.compile("\\{[^}]*\\}|\\\\[Nn]|\\\\h");
+        java.util.regex.Matcher matcher = protectedPattern.matcher(input);
+        StringBuilder staged = new StringBuilder();
+        ArrayList<String> protectedTokens = new ArrayList<String>();
+        int cursor = 0;
+        while (matcher.find()) {
+            staged.append(input.substring(cursor, matcher.start()));
+            String marker = "\uE000" + protectedTokens.size() + "\uE001";
+            protectedTokens.add(matcher.group());
+            staged.append(marker);
+            cursor = matcher.end();
+        }
+        staged.append(input.substring(cursor));
+        String cleaned = OcrTextCleaner.clean(staged.toString());
+        for (int i = 0; i < protectedTokens.size(); i++) {
+            String marker = "\uE000" + i + "\uE001";
+            cleaned = cleaned.replace(marker, protectedTokens.get(i));
+        }
+        return cleaned.trim();
+    }
+
+    private boolean areConservativelySameDialogue(String left, String right) {
+        String a = OcrTextCleaner.normalizedForMatch(left);
+        String b = OcrTextCleaner.normalizedForMatch(right);
+        if (a.length() < 3 || b.length() < 3) return false;
+        if (a.equals(b)) return true;
+        String compactA = a.replace(" ", "");
+        String compactB = b.replace(" ", "");
+        double ratio = Math.min(compactA.length(), compactB.length()) / (double) Math.max(compactA.length(), compactB.length());
+        return ratio >= 0.82d && characterSimilarity(compactA, compactB) >= 0.90d;
+    }
+
     private void cleanupCueTextArtifacts() {
         if (!ensureImported()) return;
+        captureUndoSnapshot("text cleanup");
         int changed = 0;
         for (int i = 0; i < cues.size(); i++) {
             SubtitleCue cue = cues.get(i);
             String before = cue.rawText == null ? cue.text : cue.rawText;
-            String after = sanitizeSubtitleArtifacts(before);
+            String after = cleanCuePreservingFormatting(before);
             if (after.length() == 0) after = SubtitleEngine.displayText(cue);
             if (!after.equals(before)) {
                 cue.rawText = after;
@@ -1969,7 +1972,9 @@ public class MainActivity extends Activity {
         if (visible.length() == 0) return true;
         String flat = visible.replace("\\N", " ").replace('\n', ' ').trim();
         String norm = normalizeOcrForMatch(flat);
-        if (norm.length() < 3) return true;
+        if (OcrTextCleaner.isNoiseOnly(flat)) return true;
+        if (norm.length() == 0) return !flat.matches("[!?！？]+");
+        if (flat.matches("[!?！？]+")) return false;
         int nonSpace = 0, alphaNum = 0, symbolNoise = 0;
         for (int i = 0; i < flat.length(); i++) {
             char ch = flat.charAt(i);
@@ -1980,7 +1985,6 @@ public class MainActivity extends Activity {
         }
         if (nonSpace == 0 || alphaNum / (double) nonSpace < 0.52d) return true;
         if (symbolNoise / (double) Math.max(1, nonSpace) > 0.18d) return true;
-        // Use the OCR noise detector only as a secondary flag; a confirmation dialog always follows.
         return containsLikelyOcrNoise(sanitizeSubtitleArtifacts(flat)) && alphaNum / (double) nonSpace < 0.72d;
     }
 
@@ -2010,6 +2014,7 @@ public class MainActivity extends Activity {
                 .setNegativeButton("Keep all", null)
                 .setPositiveButton("Remove selected", new android.content.DialogInterface.OnClickListener() {
                     public void onClick(android.content.DialogInterface d, int which) {
+                        captureUndoSnapshot("OCR junk removal");
                         cues.removeAll(candidates);
                         refreshScreen();
                         toast("Removed " + candidates.size() + " likely junk cue(s).");
@@ -2019,6 +2024,8 @@ public class MainActivity extends Activity {
 
     private void mergeDuplicates() {
         if (!ensureImported()) return;
+        int duplicateCount = SubtitleEngine.countDuplicates(cues, 350);
+        if (duplicateCount > 0) captureUndoSnapshot("duplicate merge");
         int removed = SubtitleEngine.mergeConsecutiveDuplicates(cues, 350);
         refreshScreen();
         toast(removed == 0 ? "No adjacent duplicate cues found." : "Merged " + removed + " duplicate cue(s).");

@@ -11,6 +11,12 @@ public class SubtitleCue {
     /** ASS alignment: 1..9; 0 means unknown/default. */
     public int alignment;
     public int marginV;
+    /** Original ASS script header (everything before [Events]) for style preservation. */
+    public String assHeader = "";
+    public String assName = "";
+    public String assEffect = "";
+    public int marginL = 0;
+    public int marginR = 0;
 
     public SubtitleCue(long startMs, long endMs, String text) {
         this.startMs = startMs;

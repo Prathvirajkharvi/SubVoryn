@@ -8,10 +8,11 @@ android {
 
     defaultConfig {
         applicationId 'com.subvoryn.voryn'
-        minSdk 21
+        minSdk 24
         targetSdk 29
-        versionCode 7
-        versionName '0.4.1-beta1'
+        ndk { abiFilters 'arm64-v8a', 'x86_64' }
+        versionCode 8
+        versionName '0.5.0-beta1'
     }
 
     compileOptions {
@@ -31,6 +32,13 @@ android {
 }
 
 dependencies {
-    // On-device English OCR. The English traineddata is bundled in app/src/main/assets/tessdata.
+    // On-device English OCR. Preserve the existing extraction engine.
     implementation 'cz.adaptech.tesseract4android:tesseract4android:4.9.0'
+
+    // Maintained FFmpegKit continuation; LGPL full includes libass/subtitles and MediaCodec.
+    // This variant does not bundle GPL-only libx264; runtime probes the actual encoders.
+    implementation 'dev.ffmpegkit-maintained:ffmpeg-kit-full:8.1.9'
+
+    // Pure-Java OCR cleanup regression tests.
+    testImplementation 'junit:junit:4.13.2'
 }
