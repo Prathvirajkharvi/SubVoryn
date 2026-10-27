@@ -742,7 +742,7 @@ public class MainActivity extends Activity {
                     lastUiUpdate = t;
                 }
             }
-            mergeSimilarOcrCues(found, cueReadings, Math.max(500L, intervalMs * 2L));
+            mergeSimilarOcrCues(found, cueReadings, Math.max(350L, intervalMs));
             SubtitleEngine.mergeConsecutiveDuplicates(found, intervalMs * 2L);
             stabilizeOcrCueTimings(found, actualDuration, intervalMs);
         } catch (Throwable e) {
@@ -1022,6 +1022,7 @@ public class MainActivity extends Activity {
         if (visible == 0 || alnum / (double) visible < 0.62) return false;
 
         String[] words = norm.split(" ");
+        if (words.length == 2 && norm.length() <= 9 && !hasKnownShortDialogueWord(words)) return false;
         if (words.length > 15) return false;
         int shortWords = 0, longWords = 0, anchoredWords = 0;
         String common = " the and you he she we they it is are was were be do did have has to of or but if what when where why how not yes no this that with for from in on at my your me us can will just so hai hain ho na bhi toh to main mein tum mujhe ye woh ek nahi kya ka ki ke ko se sirf magic stone hi lagbhag gold gajab kitna bada zyada taaqatwar monsters shikaar karte adventurers high level isse bhi chahiye chahiye tha thi hain hain kya kyun kaisa kaisi kitne kitni hoga hogi kar raha rahi rahe abhi yahan wahan mujhe tumhe unhe unka unki unke sab koi kaun agar lekin phir bahut bilkul andar bahar paise rupaye ghar naam dekho suno achha achhi accha arre arey haan nahi hain hai ji ji haan okay well right sir all only because just now then than there their gold stone magic";
@@ -1037,6 +1038,16 @@ public class MainActivity extends Activity {
         if (words.length == 1 && norm.length() < 4) return false;
         if (anchoredWords == 0 && (norm.length() < 22 || longWords < 3)) return false;
         return true;
+    }
+
+    private boolean hasKnownShortDialogueWord(String[] words) {
+        if (words == null) return false;
+        // Small-word vocabulary deliberately includes common English and Roman-Hindi anime dialogue.
+        String known = "oh no yes hi hey okay ok right go away come here look wait stop help what why how who you me my we they he she it is are was were do did can will know think want need get got good bad great fine well please thanks sorry yeah yep nope wow gajab sirf ye magic stone hi lagbhag gold kitna bada zyada taaqatwar monsters shikaar karte hain hai na toh isse bhi main tum mujhe kya kyun ka ki ke ko se par aur lekin phir bahut achha achhi arre arey haan nahi nahi ji chalo ruko dekho suno " ;
+        for (String word : words) {
+            if (known.contains(" " + word + " ") || known.startsWith(word + " ") || known.endsWith(" " + word)) return true;
+        }
+        return false;
     }
 
     private int subtitleLineScore(String line) {
@@ -1345,10 +1356,12 @@ public class MainActivity extends Activity {
         String nb = normalizeOcrForMatch(b);
         if (na.length() < 5 || nb.length() < 5) return false;
         if (na.equals(nb)) return true;
+
         String ca = na.replace(" ", "");
         String cb = nb.replace(" ", "");
         double lengthRatio = Math.min(ca.length(), cb.length()) / (double)Math.max(ca.length(), cb.length());
-        if (lengthRatio >= 0.50d && characterSimilarity(ca, cb) >= 0.68d) return true;
+        // Fuzzy character match is reserved for text with similar overall length.
+        if (lengthRatio >= 0.68d && characterSimilarity(ca, cb) >= 0.76d) return true;
 
         String[] left = meaningfulOcrWords(na);
         String[] right = meaningfulOcrWords(nb);
@@ -1356,28 +1369,35 @@ public class MainActivity extends Activity {
         int common = 0;
         for (String word : left) {
             for (String other : right) {
-                if (word.equals(other) || wordSimilarity(word, other) >= 0.82d) { common++; break; }
+                if (word.equals(other) || wordSimilarity(word, other) >= 0.86d) {
+                    common++;
+                    break;
+                }
             }
         }
         int denominator = Math.min(left.length, right.length);
-        return common >= 2 && denominator > 0 && common / (double)denominator >= 0.45d;
+        // Require at least 3 content words, avoiding merges based only on a shared phrase.
+        return common >= 3 && denominator > 0 && common / (double)denominator >= 0.58d;
     }
 
     private boolean areTemporallySimilarOcrTexts(String a, String b, long overlapMs, long minimumDurationMs) {
         if (overlapMs <= 0L || minimumDurationMs <= 0L) return false;
         double overlapRatio = overlapMs / (double)minimumDurationMs;
-        if (overlapRatio < 0.20d) return false;
+        if (overlapRatio < 0.40d) return false;
         String[] left = meaningfulOcrWords(normalizeOcrForMatch(a));
         String[] right = meaningfulOcrWords(normalizeOcrForMatch(b));
         if (left.length == 0 || right.length == 0) return false;
         int common = 0;
         for (String word : left) {
             for (String other : right) {
-                if (word.equals(other) || wordSimilarity(word, other) >= 0.82d) { common++; break; }
+                if (word.equals(other) || wordSimilarity(word, other) >= 0.86d) {
+                    common++;
+                    break;
+                }
             }
         }
         int denominator = Math.min(left.length, right.length);
-        return common >= 2 && denominator > 0 && common / (double)denominator >= 0.30d;
+        return common >= 3 && denominator > 0 && common / (double)denominator >= 0.60d;
     }
 
     private String[] meaningfulOcrWords(String text) {
