@@ -11,8 +11,8 @@ android {
         minSdk 24
         targetSdk 29
         ndk { abiFilters 'arm64-v8a', 'x86_64' }
-        versionCode 8
-        versionName '0.5.0-beta1'
+        versionCode 20
+        versionName '2.0.0'
     }
 
     compileOptions {

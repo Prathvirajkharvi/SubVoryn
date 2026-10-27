@@ -28,6 +28,7 @@ import android.view.View;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.EditText;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ProgressBar;
 import android.widget.SeekBar;
@@ -43,11 +44,13 @@ import com.arthenica.ffmpegkit.ReturnCode;
 import com.arthenica.ffmpegkit.Statistics;
 import com.arthenica.ffmpegkit.StatisticsCallback;
 
+import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -69,19 +72,21 @@ public class EncodingActivity extends Activity {
     public static final String KEY_PRESET = "default_preset";
     public static final String KEY_AUDIO = "default_audio";
     public static final String KEY_SHOW_ADVANCED = "show_advanced";
+    public static final String KEY_ENCODER_MODE = "encoder_mode_v2";
+    private static final String[] ENCODER_MODES = {"Auto (recommended)", "CPU software", "Hardware / GPU (MediaCodec, if supported)"};
 
     private static final int REQ_VIDEO = 5101;
     private static final int REQ_SUBTITLE = 5102;
     private static final int REQ_FONTS = 5103;
     private static final int REQ_OUTPUT_FOLDER = 5104;
-    private static final int C_BG = Color.rgb(14, 19, 26);
-    private static final int C_PANEL = Color.rgb(23, 30, 40);
-    private static final int C_PANEL_2 = Color.rgb(31, 40, 52);
-    private static final int C_BORDER = Color.rgb(57, 72, 91);
+    private static final int C_BG = Color.rgb(22, 24, 36);
+    private static final int C_PANEL = Color.rgb(39, 41, 60);
+    private static final int C_PANEL_2 = Color.rgb(49, 53, 76);
+    private static final int C_BORDER = Color.rgb(72, 78, 105);
     private static final int C_TEXT = Color.rgb(243, 246, 250);
-    private static final int C_MUTED = Color.rgb(161, 176, 193);
-    private static final int C_ACCENT = Color.rgb(151, 178, 207);
-    private static final int C_AMBER = Color.rgb(203, 166, 113);
+    private static final int C_MUTED = Color.rgb(172, 180, 205);
+    private static final int C_ACCENT = Color.rgb(194, 182, 241);
+    private static final int C_AMBER = Color.rgb(231, 185, 128);
     private static final String ENGINE_ARTIFACT_VERSION = "8.1.9";
     private static final String RELEASES_URL = "https://github.com/ffmpegkit-maintained/ffmpeg/releases";
     private static final String[] RESOLUTIONS = {"Original Resolution", "480p", "720p", "1080p", "1440p"};
@@ -98,6 +103,8 @@ public class EncodingActivity extends Activity {
     private boolean programmaticFilenameChange = false;
     private boolean encoding = false;
     private boolean cancelRequested = false;
+    private volatile boolean savePartialOnCancel = true;
+    private volatile long lastProcessedMediaMs = 0L;
     private long encodingStartWallMs = 0L;
     private FFmpegSession activeSession;
     private File activeTempOutput;
@@ -110,7 +117,7 @@ public class EncodingActivity extends Activity {
     private TextView videoLabel, subtitleLabel, fontLabel, outputFolderLabel;
     private TextView summaryLabel, commandPreview, startHint, progressLabel, progressDetails, outputLabel, errorLogLabel;
     private EditText filenameInput, customFpsInput;
-    private Spinner resolutionSpinner, fpsSpinner, presetSpinner, audioSpinner;
+    private Spinner resolutionSpinner, fpsSpinner, presetSpinner, audioSpinner, encoderModeSpinner;
     private SeekBar crfSeek;
     private TextView crfLabel;
     private ProgressBar encodeProgress;
@@ -215,9 +222,19 @@ public class EncodingActivity extends Activity {
         customFpsInput.setSingleLine(true);
         customFpsInput.setVisibility(View.GONE);
         qualityCard.addView(customFpsInput, margin(-1, dp(46), 0, 9));
-        qualityCard.addView(text("ENCODER STRATEGY", 10, C_ACCENT, true), margin(-1, -2, 0, 4));
-        qualityCard.addView(text("H.264 auto-detection: prefer a supported software encoder; fall back only to a detected H.264 MediaCodec encoder.", 12, C_MUTED, false), margin(-1, -2, 0, 10));
-        qualityCard.addView(text("QUALITY TARGET (CRF 16–35)", 10, C_ACCENT, true), margin(-1, -2, 0, 4));
+        qualityCard.addView(text("ENCODER MODE", 10, C_ACCENT, true), margin(-1, -2, 0, 4));
+        encoderModeSpinner = spinner(ENCODER_MODES);
+        encoderModeSpinner.setSelection(clamp(prefs.getInt(KEY_ENCODER_MODE, 0), 0, ENCODER_MODES.length - 1));
+        encoderModeSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
+            public void onItemSelected(android.widget.AdapterView<?> parent, View view, int position, long id) {
+                saveCurrentDefaults();
+                refreshSummaryAndPreview();
+            }
+            public void onNothingSelected(android.widget.AdapterView<?> parent) { }
+        });
+        qualityCard.addView(encoderModeSpinner, margin(-1, dp(46), 0, 7));
+        qualityCard.addView(text("Hardware mode uses Android MediaCodec only when the device exposes a working H.264 hardware encoder. This is not a promise of direct GPU compute. Auto mode probes supported encoders before encoding.", 11, C_MUTED, false), margin(-1, -2, 0, 10));
+        qualityCard.addView(text("QUALITY TARGET (CRF / BITRATE TARGET 16–35)", 10, C_ACCENT, true), margin(-1, -2, 0, 4));
         crfSeek = new SeekBar(this);
         crfSeek.setMax(19);
         crfSeek.setProgress(prefs.getInt(KEY_CRF, 24) - 16);
@@ -529,9 +546,13 @@ public class EncodingActivity extends Activity {
         final int quality = crfSeek.getProgress() + 16;
         final int preset = presetSpinner.getSelectedItemPosition();
         final int audio = audioSpinner.getSelectedItemPosition();
+        final int encoderMode = encoderModeSpinner.getSelectedItemPosition();
+        prefs.edit().putInt(KEY_ENCODER_MODE, encoderMode).apply();
 
         encoding = true;
         cancelRequested = false;
+        savePartialOnCancel = true;
+        lastProcessedMediaMs = 0L;
         activeSession = null;
         activeTempOutput = null;
         lastOutputUri = null;
@@ -558,7 +579,7 @@ public class EncodingActivity extends Activity {
             public void run() {
                 try {
                     runEncodingWorker(selectedVideo, selectedSubtitle, selectedFonts, selectedOutputFolder,
-                            outName, resolution, fps, customFps, quality, preset, audio);
+                            outName, resolution, fps, customFps, quality, preset, audio, encoderMode);
                 } catch (final Throwable e) {
                     final String error = safeMessage(e);
                     deleteQuietly(activeTempOutput);
@@ -576,7 +597,7 @@ public class EncodingActivity extends Activity {
 
     private void runEncodingWorker(Uri selectedVideo, Uri selectedSubtitle, Uri selectedFonts,
             Uri selectedOutputFolder, String outputName, int resolution, int fpsIndex,
-            String customFps, int quality, int presetIndex, int audioIndex) throws Exception {
+            String customFps, int quality, int presetIndex, int audioIndex, int encoderMode) throws Exception {
         File parent = getExternalFilesDir(Environment.DIRECTORY_MOVIES);
         if (parent == null) parent = getCacheDir();
         File workRoot = new File(parent, "SubVorynWork");
@@ -604,7 +625,7 @@ public class EncodingActivity extends Activity {
         String encoderList = safeOutput(encoderSession).toLowerCase(Locale.ROOT);
         String filterList = safeOutput(filterSession).toLowerCase(Locale.ROOT);
         if (!filterList.contains("subtitles")) throw new IOException("The selected FFmpeg build does not include the 'subtitles' filter/libass. No silent no-subtitle output was created.");
-        selectedEncoder = chooseUsableH264Encoder(encoderList, workDir);
+        selectedEncoder = chooseUsableH264Encoder(encoderList, workDir, encoderMode);
         if (selectedEncoder.length() == 0) throw new IOException("No H.264 encoder passed a one-frame runtime test. Listed encoders were: " + clip(encoderList, 1000) + ". This device/engine combination cannot encode H.264 with the available build; no output was created.");
         if (cancelRequested) throw new IOException("Cancelled during engine capability checks.");
 
@@ -613,11 +634,13 @@ public class EncodingActivity extends Activity {
         copyUriToFile(selectedVideo, input);
         if (cancelRequested) throw new IOException("Cancelled during preparation.");
         postProgress("Copying subtitle file…", "Selected subtitles will be burned once into the video.", true);
-        File subtitle = new File(workDir, "subtitles." + extensionOf(subtitleName));
-        copyUriToFile(selectedSubtitle, subtitle);
+        File subtitleSource = new File(workDir, "subtitles_source." + extensionOf(subtitleName));
+        copyUriToFile(selectedSubtitle, subtitleSource);
         if (cancelRequested) throw new IOException("Cancelled during preparation.");
         if (!input.isFile() || input.length() == 0L) throw new IOException("The copied input video is empty or inaccessible.");
-        if (!subtitle.isFile() || subtitle.length() == 0L) throw new IOException("The copied subtitle file is empty or inaccessible.");
+        if (!subtitleSource.isFile() || subtitleSource.length() == 0L) throw new IOException("The copied subtitle file is empty or inaccessible.");
+        File subtitle = prepareSubtitleForRender(subtitleSource, workDir);
+        if (cancelRequested) throw new IOException("Cancelled during subtitle preparation.");
 
         File fontsDir = new File(workDir, "fonts");
         int copiedFonts = selectedFonts == null ? 0 : copyFonts(selectedFonts, fontsDir);
@@ -647,6 +670,7 @@ public class EncodingActivity extends Activity {
         activeTempOutput = new File(workDir, "encoded_" + System.currentTimeMillis() + ".mp4");
         if (activeTempOutput.exists() && !activeTempOutput.delete()) throw new IOException("Cannot create a clean temporary output file.");
         final File outFile = activeTempOutput;
+        final File sessionWorkDir = workDir;
         final long expectedDuration = durationMs;
         final String engineEncoder = selectedEncoder;
         final String filter = makeFilter(subtitle, fontsDir, copiedFonts, resolution);
@@ -673,7 +697,8 @@ public class EncodingActivity extends Activity {
             String[] bitrates = {"", "96k", "128k", "160k", "192k", "256k", "320k"};
             Collections.addAll(args, "-c:a", "aac", "-b:a", bitrates[clamp(audioIndex, 1, bitrates.length - 1)]);
         }
-        Collections.addAll(args, "-movflags", "+faststart", "-stats_period", "0.5", outFile.getAbsolutePath());
+        // Fragmented MP4 commits short fragments during encoding. It allows a canceled job to retain only the encoded prefix.
+        Collections.addAll(args, "-movflags", "+frag_keyframe+empty_moov+default_base_moof", "-frag_duration", "1000000", "-stats_period", "0.5", outFile.getAbsolutePath());
 
         runOnUiThread(new Runnable() {
             public void run() {
@@ -688,9 +713,13 @@ public class EncodingActivity extends Activity {
                 new FFmpegSessionCompleteCallback() {
                     public void apply(final FFmpegSession session) {
                         if (cancelRequested || session == null || ReturnCode.isCancel(session.getReturnCode())) {
-                            deleteQuietly(outFile);
-                            deleteTree(workDir);
-                            runOnUiThread(new Runnable() { public void run() { finishCancelled(); } });
+                            if (cancelRequested && savePartialOnCancel && outFile.isFile() && outFile.length() > 1024L) {
+                                finalizeAndPublishPartial(outFile, sessionWorkDir, outputName, selectedOutputFolder, expectedDuration, engineEncoder, wallStart);
+                            } else {
+                                deleteQuietly(outFile);
+                                deleteTree(sessionWorkDir);
+                                runOnUiThread(new Runnable() { public void run() { finishCancelled(); } });
+                            }
                             return;
                         }
                         if (!ReturnCode.isSuccess(session.getReturnCode()) || !outFile.isFile() || outFile.length() == 0L) {
@@ -754,6 +783,7 @@ public class EncodingActivity extends Activity {
                     public void apply(final Statistics statistics) {
                         if (statistics == null) return;
                         final long processed = Math.max(0L, (long) statistics.getTime());
+                        lastProcessedMediaMs = processed;
                         final double numericSpeed = statistics.getSpeed();
                         final String speed = numericSpeed > 0.0d ? String.format(Locale.US, "%.2fx", numericSpeed) : "unavailable";
                         final long elapsed = Math.max(0L, System.currentTimeMillis() - wallStart);
@@ -778,6 +808,28 @@ public class EncodingActivity extends Activity {
                 });
     }
 
+    private File prepareSubtitleForRender(File source, File sessionDir) throws IOException {
+        String ext = extensionOf(source.getName());
+        if ("ass".equals(ext) || "ssa".equals(ext)) return source; // Never flatten or rewrite existing ASS/SSA styling.
+        int format = "vtt".equals(ext) ? SubtitleEngine.FORMAT_VTT : SubtitleEngine.FORMAT_SRT;
+        if (source.length() > 20L * 1024L * 1024L) throw new IOException("Subtitle file exceeds the 20 MB safety limit.");
+        StringBuilder body = new StringBuilder();
+        BufferedReader reader = new BufferedReader(new InputStreamReader(new FileInputStream(source), "UTF-8"));
+        try {
+            char[] buffer = new char[8192]; int count;
+            while ((count = reader.read(buffer)) != -1) body.append(buffer, 0, count);
+        } finally { try { reader.close(); } catch (Exception ignored) { } }
+        List<SubtitleCue> parsed = SubtitleEngine.parse(body.toString(), format);
+        if (parsed == null || parsed.isEmpty()) throw new IOException("The selected SRT/VTT file has no valid subtitle cues.");
+        String ass = SubtitleEngine.export(parsed, SubtitleEngine.FORMAT_ASS, SubtitleEngine.POSITION_ORIGINAL);
+        File renderFile = new File(sessionDir, "subtitles_render.ass");
+        FileOutputStream output = new FileOutputStream(renderFile, false);
+        try { output.write(ass.getBytes("UTF-8")); output.flush(); }
+        finally { try { output.close(); } catch (Exception ignored) { } }
+        if (!renderFile.isFile() || renderFile.length() == 0L) throw new IOException("Could not convert SRT/VTT cues to a renderer-compatible ASS file.");
+        return renderFile;
+    }
+
     private String makeFilter(File subtitle, File fontsDir, int copiedFonts, int resolution) throws IOException {
         if (subtitle == null || !subtitle.isFile()) throw new IOException("Subtitle file was not staged correctly.");
         String ext = extensionOf(subtitle.getName());
@@ -787,26 +839,134 @@ public class EncodingActivity extends Activity {
         if (ass && copiedFonts > 0 && fontsDir.isDirectory()) filter += ":fontsdir='" + escapeFilterPath(fontsDir.getAbsolutePath()) + "'";
         int height = resolutionHeight(resolution);
         if (height > 0) {
-            int width = (int) Math.round(height * 16.0d / 9.0d);
-            filter += ",scale=w='min(iw," + width + ")':h='min(ih," + height + ")':force_original_aspect_ratio=decrease:force_divisible_by=2";
+            // A selected 480p/720p/1080p/1440p target means that exact output height, with aspect ratio intact.
+            // Original Resolution returns above without adding any scale filter.
+            filter += ",scale=-2:" + height;
         }
         return filter;
     }
 
     private void confirmCancel() {
         if (!encoding) return;
-        new AlertDialog.Builder(this).setTitle("Cancel encoding?")
-                .setMessage("The current encode will stop and the incomplete temporary output will be deleted. Selected source files are not modified.")
+        new AlertDialog.Builder(this).setTitle("Stop encoding?")
+                .setMessage("Save only the already-encoded beginning of this video as a playable PARTIAL file? The remaining unencoded duration will not be included. Choose Discard to remove the temporary output instead.")
                 .setNegativeButton("Continue encoding", null)
-                .setPositiveButton("Cancel encoding", new android.content.DialogInterface.OnClickListener() {
-                    public void onClick(android.content.DialogInterface d, int which) {
-                        cancelRequested = true;
-                        progressLabel.setText("Cancellation requested…");
-                        cancelButton.setEnabled(false);
-                        FFmpegSession session = activeSession;
-                        if (session != null) FFmpegKit.cancel(session.getSessionId());
-                    }
+                .setNeutralButton("Cancel & discard", new android.content.DialogInterface.OnClickListener() {
+                    public void onClick(android.content.DialogInterface d, int which) { requestEncodingCancel(false); }
+                })
+                .setPositiveButton("Cancel & save partial", new android.content.DialogInterface.OnClickListener() {
+                    public void onClick(android.content.DialogInterface d, int which) { requestEncodingCancel(true); }
                 }).show();
+    }
+
+    private void requestEncodingCancel(boolean keepPartial) {
+        savePartialOnCancel = keepPartial;
+        cancelRequested = true;
+        progressLabel.setText(keepPartial ? "Stopping and preparing the encoded prefix…" : "Cancellation requested; partial output will be discarded…");
+        if (startHint != null) startHint.setText(keepPartial ? "Saving only the already-encoded part; unprocessed video will not be included." : "Stopping encoding and discarding the temporary file.");
+        cancelButton.setEnabled(false);
+        FFmpegSession session = activeSession;
+        if (session != null) FFmpegKit.cancel(session.getSessionId());
+    }
+
+    private void finalizeAndPublishPartial(final File raw, final File sessionDir, final String requestedName,
+            final Uri selectedFolder, final long expectedDuration, final String encoder, final long wallStart) {
+        new Thread(new Runnable() {
+            public void run() {
+                try {
+                    final File playable = finalizePartialFile(raw, sessionDir);
+                    long mediaDuration = durationOfVideoFile(playable);
+                    if (mediaDuration <= 0L) mediaDuration = lastProcessedMediaMs;
+                    if (expectedDuration > 0L) mediaDuration = Math.min(mediaDuration, expectedDuration);
+                    if (mediaDuration <= 0L) throw new IOException("FFmpeg stopped before a measurable playable video segment was produced.");
+                    final long savedDuration = mediaDuration;
+                    final long bytes = playable.length();
+                    final String partialName = buildPartialFilename(requestedName, savedDuration);
+                    final Uri savedUri = publishOutput(playable, partialName, selectedFolder);
+                    final String actualName = queryName(savedUri);
+                    deleteTree(sessionDir);
+                    runOnUiThread(new Runnable() {
+                        public void run() {
+                            finishPartialSaved(savedUri, actualName == null || actualName.length() == 0 ? partialName : actualName,
+                                    savedDuration, bytes, wallStart, encoder, expectedDuration);
+                        }
+                    });
+                } catch (final Throwable failure) {
+                    deleteTree(sessionDir);
+                    runOnUiThread(new Runnable() {
+                        public void run() { finishCancelWithoutPlayablePartial("The encode was stopped, but the produced fragment could not be validated/finalized as playable. No false successful file was saved. Detail: " + safeMessage(failure)); }
+                    });
+                }
+            }
+        }, "SubVoryn-PartialFinalize").start();
+    }
+
+    private File finalizePartialFile(File raw, File sessionDir) throws IOException {
+        if (raw == null || !raw.isFile() || raw.length() <= 1024L) throw new IOException("The partial MP4 is empty or too small to validate.");
+        File remuxed = new File(sessionDir, "partial-finalized.mp4");
+        deleteQuietly(remuxed);
+        String[] remuxArgs = new String[] {"-hide_banner", "-y", "-i", raw.getAbsolutePath(), "-map", "0:v:0", "-map", "0:a?", "-c", "copy", "-movflags", "+faststart", remuxed.getAbsolutePath()};
+        try {
+            FFmpegSession remux = FFmpegKit.executeWithArguments(remuxArgs);
+            if (remux != null && ReturnCode.isSuccess(remux.getReturnCode()) && isPlayablePartial(remuxed)) return remuxed;
+        } catch (Throwable ignored) { }
+        if (isPlayablePartial(raw)) return raw;
+        throw new IOException("The fragmented MP4 did not pass remux/playability checks. Try encoding a little longer before canceling.");
+    }
+
+    private boolean isPlayablePartial(File candidate) {
+        if (candidate == null || !candidate.isFile() || candidate.length() <= 1024L) return false;
+        if (durationOfVideoFile(candidate) <= 0L) return false;
+        try {
+            FFmpegSession check = FFmpegKit.executeWithArguments(new String[] {"-hide_banner", "-v", "error", "-i", candidate.getAbsolutePath(), "-map", "0:v:0", "-f", "null", "-"});
+            return check != null && ReturnCode.isSuccess(check.getReturnCode());
+        } catch (Throwable ignored) { return false; }
+    }
+
+    private long durationOfVideoFile(File file) {
+        if (file == null || !file.isFile()) return 0L;
+        MediaMetadataRetriever retriever = new MediaMetadataRetriever();
+        try {
+            retriever.setDataSource(file.getAbsolutePath());
+            String value = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
+            return value == null ? 0L : Math.max(0L, Long.parseLong(value));
+        } catch (Throwable ignored) { return 0L; }
+        finally { try { retriever.release(); } catch (Exception ignored) { } }
+    }
+
+    private String buildPartialFilename(String requested, long durationMs) {
+        String name = ensureMp4(sanitizeOutputName(requested));
+        String base = name.substring(0, name.length() - 4);
+        long totalSeconds = Math.max(0L, durationMs / 1000L);
+        long minutes = totalSeconds / 60L, seconds = totalSeconds % 60L;
+        return base + "-PARTIAL-" + String.format(Locale.US, "%02dm%02ds", minutes, seconds) + ".mp4";
+    }
+
+    private void finishPartialSaved(Uri uri, String name, long mediaMs, long bytes, long wallStart, String encoder, long expectedDuration) {
+        encoding = false; cancelRequested = false; savePartialOnCancel = true; lastOutputUri = uri;
+        encodeProgress.setIndeterminate(false);
+        int percent = expectedDuration > 0L ? clamp((int) (100L * Math.min(mediaMs, expectedDuration) / expectedDuration), 0, 99) : 0;
+        encodeProgress.setProgress(percent);
+        progressLabel.setText("Cancelled · playable partial saved");
+        progressDetails.setText("Saved only the encoded prefix: " + formatDuration(mediaMs) + " of " + formatDuration(expectedDuration) +
+                " source duration. Remaining unencoded video is not included.\nOutput " + formatBytes(bytes) + " · encoder " + encoder +
+                " · elapsed " + formatDuration(Math.max(0L, System.currentTimeMillis() - wallStart)));
+        outputLabel.setText("PARTIAL video saved: " + name + "\n" + destinationDescription(outputTreeUri) + "\nPreview this segment before restarting the full encode.");
+        if (startHint != null) startHint.setText("Playable partial saved. Fix subtitle timing/settings, then start a new encode from the beginning.");
+        startButton.setEnabled(videoUri != null && subtitleUri != null); cancelButton.setEnabled(false);
+        openOutputButton.setEnabled(true); shareOutputButton.setEnabled(true);
+        toast("Playable partial video saved: " + formatDuration(mediaMs));
+    }
+
+    private void finishCancelWithoutPlayablePartial(String detail) {
+        encoding = false; cancelRequested = false; savePartialOnCancel = true;
+        encodeProgress.setIndeterminate(false);
+        progressLabel.setText("Encoding cancelled · no playable partial");
+        progressDetails.setText(detail);
+        startButton.setEnabled(videoUri != null && subtitleUri != null); cancelButton.setEnabled(false);
+        if (startHint != null) startHint.setText("No playable partial could be saved. Try canceling after more video has encoded.");
+        if (activeTempOutput != null) deleteQuietly(activeTempOutput);
+        toast("Encoding stopped; partial output could not be finalized.");
     }
 
     private void finishCancelled() {
@@ -973,10 +1133,7 @@ public class EncodingActivity extends Activity {
         String ext = extensionOf(subtitleName);
         if (("ass".equals(ext) || "ssa".equals(ext)) && fontsTreeUri != null && fontCount > 0) filter += ":fontsdir='<selected-font-folder>'";
         int height = resolutionHeight(resolutionSpinner == null ? 0 : resolutionSpinner.getSelectedItemPosition());
-        if (height > 0) {
-            int width = (int) Math.round(height * 16.0d / 9.0d);
-            filter += ",scale=w='min(iw," + width + ")':h='min(ih," + height + ")':force_original_aspect_ratio=decrease:force_divisible_by=2";
-        }
+        if (height > 0) filter += ",scale=-2:" + height;
         int quality = crfSeek == null ? 24 : crfSeek.getProgress() + 16;
         int audio = audioSpinner == null ? 2 : audioSpinner.getSelectedItemPosition();
         String fps = fpsSpinner == null ? "" : fpsValueFor(fpsSpinner.getSelectedItemPosition(), customFpsInput == null ? "30" : customFpsInput.getText().toString().trim());
@@ -991,7 +1148,7 @@ public class EncodingActivity extends Activity {
         }
         String frameRate = fps.length() == 0 ? "-fps_mode passthrough" : "-r " + fps + " -fps_mode cfr";
         return "ffmpeg -i \"" + video + "\" -vf \"" + filter + "\" -map 0:v:0 -map '0:a?' -sn -c:v " + videoEncoder + " " + videoQuality +
-                " -pix_fmt yuv420p " + frameRate + " " + audioCommand + " -movflags +faststart \"" + name + "\"\n\n" +
+                " -pix_fmt yuv420p " + frameRate + " " + audioCommand + " -movflags +frag_keyframe+empty_moov+default_base_moof -frag_duration 1000000 \"" + name + "\"\n\n" +
                 "This is a readable equivalent configuration. The app copies SAF streams to a private working directory and resolves actual paths at runtime; this preview does not expose those private paths and may not be directly runnable as pasted.";
     }
 
@@ -1000,8 +1157,11 @@ public class EncodingActivity extends Activity {
         return value.replace("\\", "\\\\").replace("'", "\\'").replace(":", "\\:").replace(",", "\\,");
     }
 
-    private String chooseUsableH264Encoder(String output, File workDirectory) throws IOException {
-        String[] candidates = {"libx264", "libopenh264", "h264_mediacodec"};
+    private String chooseUsableH264Encoder(String output, File workDirectory, int requestedMode) throws IOException {
+        final String[] candidates;
+        if (requestedMode == 1) candidates = new String[] {"libx264", "libopenh264"};
+        else if (requestedMode == 2) candidates = new String[] {"h264_mediacodec"};
+        else candidates = new String[] {"libx264", "libopenh264", "h264_mediacodec"};
         StringBuilder failures = new StringBuilder();
         for (String candidate : candidates) {
             if (!output.contains(candidate)) continue;
@@ -1062,7 +1222,8 @@ public class EncodingActivity extends Activity {
         b.append("Mode: hardcoded subtitles — permanently rendered into video\n");
         b.append("Resolution: ").append(RESOLUTIONS[resolutionSpinner.getSelectedItemPosition()]).append(" · FPS: ")
                 .append(fpsValueFor(fpsSpinner.getSelectedItemPosition(), customFpsInput.getText().toString().trim()).length() == 0 ? "Original" : fpsValueFor(fpsSpinner.getSelectedItemPosition(), customFpsInput.getText().toString().trim())).append('\n');
-        b.append("Encoder: ").append("not checked".equals(selectedEncoder) ? "auto, verified before encoding" : selectedEncoder).append(" · quality: ").append(makeQualitySummary()).append('\n');
+        b.append("Encoder mode: ").append(encoderModeSpinner == null ? ENCODER_MODES[0] : ENCODER_MODES[clamp(encoderModeSpinner.getSelectedItemPosition(), 0, ENCODER_MODES.length - 1)]).append('\n');
+        b.append("Actual encoder: ").append("not checked".equals(selectedEncoder) ? "verified at Start" : selectedEncoder).append(" · quality: ").append(makeQualitySummary()).append('\n');
         b.append("Preset: ").append(PRESETS[presetSpinner.getSelectedItemPosition()])
                 .append(" (honored only when libx264 is actually available)").append(" · Audio: ")
                 .append(AUDIO_OPTIONS[audioSpinner.getSelectedItemPosition()]).append('\n');
@@ -1089,23 +1250,24 @@ public class EncodingActivity extends Activity {
     }
 
     private void saveCurrentDefaults() {
-        if (prefs == null || resolutionSpinner == null || fpsSpinner == null || presetSpinner == null || audioSpinner == null || crfSeek == null) return;
+        if (prefs == null || resolutionSpinner == null || fpsSpinner == null || presetSpinner == null || audioSpinner == null || crfSeek == null || encoderModeSpinner == null) return;
         prefs.edit().putInt(KEY_RESOLUTION, resolutionSpinner.getSelectedItemPosition())
                 .putInt(KEY_FPS, fpsSpinner.getSelectedItemPosition())
                 .putString(KEY_CUSTOM_FPS, customFpsInput == null ? "30" : customFpsInput.getText().toString().trim())
                 .putInt(KEY_CRF, crfSeek.getProgress() + 16)
                 .putInt(KEY_PRESET, presetSpinner.getSelectedItemPosition())
-                .putInt(KEY_AUDIO, audioSpinner.getSelectedItemPosition()).apply();
+                .putInt(KEY_AUDIO, audioSpinner.getSelectedItemPosition()).putInt(KEY_ENCODER_MODE, encoderModeSpinner.getSelectedItemPosition()).apply();
     }
 
     @Override protected void onDestroy() {
         if (isFinishing() && encoding) {
+            // Leave the fragmented file intact so the completion callback can validate and save the encoded prefix.
             cancelRequested = true;
+            savePartialOnCancel = true;
             FFmpegSession session = activeSession;
             if (session != null) {
                 try { FFmpegKit.cancel(session.getSessionId()); } catch (Exception ignored) { }
             }
-            deleteQuietly(activeTempOutput);
         }
         super.onDestroy();
     }
@@ -1114,29 +1276,37 @@ public class EncodingActivity extends Activity {
         LinearLayout nav = new LinearLayout(this);
         nav.setGravity(Gravity.CENTER);
         nav.setBackgroundColor(C_PANEL);
-        String[] names = {"Home", "Encoding", "Settings"};
-        for (int i = 0; i < names.length; i++) {
+        nav.setElevation(dp(5));
+        int[] icons = new int[] {R.drawable.ic_nav_home, R.drawable.ic_nav_encode, R.drawable.ic_nav_settings};
+        final String[] labels = new String[] {"Home", "Encoding", "Settings"};
+        for (int i = 0; i < labels.length; i++) {
             final int index = i;
-            Button b = new Button(this);
-            b.setAllCaps(false);
-            b.setText(names[i]);
-            b.setTextSize(12);
-            b.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-            b.setTextColor(i == active ? C_ACCENT : C_MUTED);
-            b.setMinHeight(0); b.setMinimumHeight(0);
-            b.setPadding(dp(2), 0, dp(2), 0);
-            b.setBackgroundDrawable(round(i == active ? C_PANEL_2 : C_PANEL, i == active ? C_ACCENT : C_PANEL, 12));
-            b.setOnClickListener(new View.OnClickListener() {
+            LinearLayout tile = new LinearLayout(this);
+            tile.setGravity(Gravity.CENTER);
+            tile.setOrientation(LinearLayout.VERTICAL);
+            tile.setContentDescription(labels[i]);
+            tile.setFocusable(true);
+            tile.setBackgroundDrawable(round(i == active ? C_PANEL_2 : C_PANEL,
+                    i == active ? C_ACCENT : C_BORDER, 16));
+            tile.setElevation(dp(i == active ? 6 : 2));
+            ImageView icon = new ImageView(this);
+            icon.setImageResource(icons[i]);
+            icon.setColorFilter(i == active ? C_ACCENT : C_MUTED);
+            icon.setContentDescription(labels[i]);
+            LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(dp(24), dp(24));
+            tile.addView(icon, iconParams);
+            tile.setOnClickListener(new View.OnClickListener() {
                 public void onClick(View v) {
-                    if (index == 0) startActivity(new Intent(EncodingActivity.this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
-                    else if (index == 2) startActivity(new Intent(EncodingActivity.this, SettingsActivity.class).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
+                    if (index == 0 && !(false)) startActivity(new Intent(EncodingActivity.this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
+                    else if (index == 1 && !(true)) startActivity(new Intent(EncodingActivity.this, EncodingActivity.class).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
+                    else if (index == 2 && !(false)) startActivity(new Intent(EncodingActivity.this, SettingsActivity.class).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
                 }
             });
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(46), 1);
-            lp.leftMargin = dp(5); lp.rightMargin = dp(5);
-            nav.addView(b, lp);
+            LinearLayout.LayoutParams tileParams = new LinearLayout.LayoutParams(0, dp(48), 1f);
+            tileParams.leftMargin = dp(5); tileParams.rightMargin = dp(5);
+            nav.addView(tile, tileParams);
         }
-        nav.setPadding(dp(5), dp(5), dp(5), dp(5));
+        nav.setPadding(dp(7), dp(6), dp(7), dp(6));
         return nav;
     }
 
@@ -1384,6 +1554,7 @@ public class EncodingActivity extends Activity {
         c.setOrientation(LinearLayout.VERTICAL);
         c.setPadding(dp(14), dp(14), dp(14), dp(14));
         c.setBackgroundDrawable(round(C_PANEL, C_BORDER, 17));
+        c.setElevation(dp(5));
         return c;
     }
 
@@ -1404,6 +1575,7 @@ public class EncodingActivity extends Activity {
         b.setTextColor(primary ? C_BG : C_TEXT);
         b.setPadding(dp(8), dp(6), dp(8), dp(6));
         b.setBackgroundDrawable(round(primary ? C_ACCENT : C_PANEL_2, primary ? C_ACCENT : C_BORDER, 12));
+        b.setElevation(dp(primary ? 5 : 2));
         return b;
     }
 

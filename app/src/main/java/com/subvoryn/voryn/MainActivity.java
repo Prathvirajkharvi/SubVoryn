@@ -55,14 +55,14 @@ public class MainActivity extends Activity {
     private static final int REQUEST_IMPORT = 4101;
     private static final int REQUEST_EXPORT = 4102;
     private static final int MAX_VISIBLE_CUES = 24;
-    private static final int C_BG = Color.rgb(14, 19, 26);
-    private static final int C_PANEL = Color.rgb(23, 30, 40);
-    private static final int C_PANEL_2 = Color.rgb(31, 40, 52);
-    private static final int C_BORDER = Color.rgb(57, 72, 91);
+    private static final int C_BG = Color.rgb(22, 24, 36);
+    private static final int C_PANEL = Color.rgb(39, 41, 60);
+    private static final int C_PANEL_2 = Color.rgb(49, 53, 76);
+    private static final int C_BORDER = Color.rgb(72, 78, 105);
     private static final int C_TEXT = Color.rgb(243, 246, 250);
-    private static final int C_MUTED = Color.rgb(161, 176, 193);
-    private static final int C_ACCENT = Color.rgb(151, 178, 207);
-    private static final int C_AMBER = Color.rgb(203, 166, 113);
+    private static final int C_MUTED = Color.rgb(172, 180, 205);
+    private static final int C_ACCENT = Color.rgb(194, 182, 241);
+    private static final int C_AMBER = Color.rgb(231, 185, 128);
 
     private LinearLayout root;
     private LinearLayout content;
@@ -317,20 +317,37 @@ public class MainActivity extends Activity {
         LinearLayout nav = new LinearLayout(this);
         nav.setGravity(Gravity.CENTER);
         nav.setBackgroundColor(C_PANEL);
-        String[] labels = new String[] {"Home", "Encoding", "Settings"};
+        nav.setElevation(dp(5));
+        int[] icons = new int[] {R.drawable.ic_nav_home, R.drawable.ic_nav_encode, R.drawable.ic_nav_settings};
+        final String[] labels = new String[] {"Home", "Encoding", "Settings"};
         for (int i = 0; i < labels.length; i++) {
             final int index = i;
-            Button item = button(labels[i], i == active);
-            item.setTextSize(12);
-            item.setMinHeight(0); item.setMinimumHeight(0);
-            item.setOnClickListener(new View.OnClickListener() { public void onClick(View v) {
-                if (index == 1) startActivity(new Intent(MainActivity.this, EncodingActivity.class).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
-                else if (index == 2) startActivity(new Intent(MainActivity.this, SettingsActivity.class).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
-            }});
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(46), 1f);
-            lp.leftMargin = dp(5); lp.rightMargin = dp(5); nav.addView(item, lp);
+            LinearLayout tile = new LinearLayout(this);
+            tile.setGravity(Gravity.CENTER);
+            tile.setOrientation(LinearLayout.VERTICAL);
+            tile.setContentDescription(labels[i]);
+            tile.setFocusable(true);
+            tile.setBackgroundDrawable(round(i == active ? C_PANEL_2 : C_PANEL,
+                    i == active ? C_ACCENT : C_BORDER, 16));
+            tile.setElevation(dp(i == active ? 6 : 2));
+            ImageView icon = new ImageView(this);
+            icon.setImageResource(icons[i]);
+            icon.setColorFilter(i == active ? C_ACCENT : C_MUTED);
+            icon.setContentDescription(labels[i]);
+            LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(dp(24), dp(24));
+            tile.addView(icon, iconParams);
+            tile.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) {
+                    if (index == 0 && !(true)) startActivity(new Intent(MainActivity.this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
+                    else if (index == 1 && !(false)) startActivity(new Intent(MainActivity.this, EncodingActivity.class).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
+                    else if (index == 2 && !(false)) startActivity(new Intent(MainActivity.this, SettingsActivity.class).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
+                }
+            });
+            LinearLayout.LayoutParams tileParams = new LinearLayout.LayoutParams(0, dp(48), 1f);
+            tileParams.leftMargin = dp(5); tileParams.rightMargin = dp(5);
+            nav.addView(tile, tileParams);
         }
-        nav.setPadding(dp(5), dp(5), dp(5), dp(5));
+        nav.setPadding(dp(7), dp(6), dp(7), dp(6));
         return nav;
     }
 
@@ -360,6 +377,7 @@ public class MainActivity extends Activity {
         box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(dp(14), dp(14), dp(14), dp(14));
         box.setBackgroundDrawable(round(C_PANEL, C_BORDER, 18));
+        box.setElevation(dp(5));
         return box;
     }
 
@@ -382,6 +400,7 @@ public class MainActivity extends Activity {
         b.setTextColor(primary ? C_BG : C_TEXT);
         b.setPadding(dp(8), dp(6), dp(8), dp(6));
         b.setBackgroundDrawable(round(primary ? C_ACCENT : C_PANEL_2, primary ? C_ACCENT : C_BORDER, 13));
+        b.setElevation(dp(primary ? 5 : 2));
         return b;
     }
 

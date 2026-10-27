@@ -17,6 +17,7 @@ import android.view.View;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Spinner;
@@ -41,13 +42,13 @@ import java.util.Locale;
 
 /** SubVoryn Settings: persistent defaults plus honest bundled-engine diagnostics. */
 public class SettingsActivity extends Activity {
-    private static final int C_BG = Color.rgb(14, 19, 26);
-    private static final int C_PANEL = Color.rgb(23, 30, 40);
-    private static final int C_PANEL_2 = Color.rgb(31, 40, 52);
-    private static final int C_BORDER = Color.rgb(57, 72, 91);
+    private static final int C_BG = Color.rgb(22, 24, 36);
+    private static final int C_PANEL = Color.rgb(39, 41, 60);
+    private static final int C_PANEL_2 = Color.rgb(49, 53, 76);
+    private static final int C_BORDER = Color.rgb(72, 78, 105);
     private static final int C_TEXT = Color.rgb(243, 246, 250);
-    private static final int C_MUTED = Color.rgb(161, 176, 193);
-    private static final int C_ACCENT = Color.rgb(151, 178, 207);
+    private static final int C_MUTED = Color.rgb(172, 180, 205);
+    private static final int C_ACCENT = Color.rgb(194, 182, 241);
     private static final String RELEASES_URL = "https://github.com/ffmpegkit-maintained/ffmpeg/releases";
     private static final String ENGINE_VERSION = "8.1.9";
     private SharedPreferences prefs;
@@ -390,29 +391,44 @@ public class SettingsActivity extends Activity {
         LinearLayout nav = new LinearLayout(this);
         nav.setGravity(Gravity.CENTER);
         nav.setBackgroundColor(C_PANEL);
-        String[] names = {"Home", "Encoding", "Settings"};
-        for (int i = 0; i < names.length; i++) {
+        nav.setElevation(dp(5));
+        int[] icons = new int[] {R.drawable.ic_nav_home, R.drawable.ic_nav_encode, R.drawable.ic_nav_settings};
+        final String[] labels = new String[] {"Home", "Encoding", "Settings"};
+        for (int i = 0; i < labels.length; i++) {
             final int index = i;
-            Button b = new Button(this);
-            b.setText(names[i]); b.setAllCaps(false); b.setTextSize(12); b.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
-            b.setTextColor(i == active ? C_ACCENT : C_MUTED);
-            b.setMinHeight(0); b.setMinimumHeight(0); b.setPadding(dp(2), 0, dp(2), 0);
-            b.setBackgroundDrawable(round(i == active ? C_PANEL_2 : C_PANEL, i == active ? C_ACCENT : C_PANEL, 12));
-            b.setOnClickListener(new View.OnClickListener() { public void onClick(View v) {
-                if (index == 0) startActivity(new Intent(SettingsActivity.this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
-                else if (index == 1) startActivity(new Intent(SettingsActivity.this, EncodingActivity.class).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
-            }});
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, dp(46), 1);
-            lp.leftMargin = dp(5); lp.rightMargin = dp(5); nav.addView(b, lp);
+            LinearLayout tile = new LinearLayout(this);
+            tile.setGravity(Gravity.CENTER);
+            tile.setOrientation(LinearLayout.VERTICAL);
+            tile.setContentDescription(labels[i]);
+            tile.setFocusable(true);
+            tile.setBackgroundDrawable(round(i == active ? C_PANEL_2 : C_PANEL,
+                    i == active ? C_ACCENT : C_BORDER, 16));
+            tile.setElevation(dp(i == active ? 6 : 2));
+            ImageView icon = new ImageView(this);
+            icon.setImageResource(icons[i]);
+            icon.setColorFilter(i == active ? C_ACCENT : C_MUTED);
+            icon.setContentDescription(labels[i]);
+            LinearLayout.LayoutParams iconParams = new LinearLayout.LayoutParams(dp(24), dp(24));
+            tile.addView(icon, iconParams);
+            tile.setOnClickListener(new View.OnClickListener() {
+                public void onClick(View v) {
+                    if (index == 0 && !(false)) startActivity(new Intent(SettingsActivity.this, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
+                    else if (index == 1 && !(false)) startActivity(new Intent(SettingsActivity.this, EncodingActivity.class).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
+                    else if (index == 2 && !(true)) startActivity(new Intent(SettingsActivity.this, SettingsActivity.class).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT));
+                }
+            });
+            LinearLayout.LayoutParams tileParams = new LinearLayout.LayoutParams(0, dp(48), 1f);
+            tileParams.leftMargin = dp(5); tileParams.rightMargin = dp(5);
+            nav.addView(tile, tileParams);
         }
-        nav.setPadding(dp(5), dp(5), dp(5), dp(5));
+        nav.setPadding(dp(7), dp(6), dp(7), dp(6));
         return nav;
     }
 
-    private LinearLayout card() { LinearLayout c = new LinearLayout(this); c.setOrientation(LinearLayout.VERTICAL); c.setPadding(dp(14), dp(14), dp(14), dp(14)); c.setBackgroundDrawable(round(C_PANEL, C_BORDER, 17)); return c; }
+    private LinearLayout card() { LinearLayout c = new LinearLayout(this); c.setOrientation(LinearLayout.VERTICAL); c.setPadding(dp(14), dp(14), dp(14), dp(14)); c.setBackgroundDrawable(round(C_PANEL, C_BORDER, 17)); c.setElevation(dp(5)); return c; }
     private TextView section(String s) { return text(s, 10, C_ACCENT, true); }
     private TextView text(String s, float size, int color, boolean bold) { TextView t = new TextView(this); t.setText(s); t.setTextSize(size); t.setTextColor(color); if (bold) t.setTypeface(Typeface.DEFAULT, Typeface.BOLD); t.setGravity(Gravity.CENTER_VERTICAL); return t; }
-    private Button button(String s, boolean primary) { Button b = new Button(this); b.setText(s); b.setAllCaps(false); b.setTextSize(12); b.setTypeface(Typeface.DEFAULT, Typeface.BOLD); b.setTextColor(primary ? C_BG : C_TEXT); b.setPadding(dp(7), dp(5), dp(7), dp(5)); b.setBackgroundDrawable(round(primary ? C_ACCENT : C_PANEL_2, primary ? C_ACCENT : C_BORDER, 12)); return b; }
+    private Button button(String s, boolean primary) { Button b = new Button(this); b.setText(s); b.setAllCaps(false); b.setTextSize(12); b.setTypeface(Typeface.DEFAULT, Typeface.BOLD); b.setTextColor(primary ? C_BG : C_TEXT); b.setPadding(dp(7), dp(5), dp(7), dp(5)); b.setBackgroundDrawable(round(primary ? C_ACCENT : C_PANEL_2, primary ? C_ACCENT : C_BORDER, 12)); b.setElevation(dp(primary ? 5 : 2)); return b; }
     private Spinner spinner(String[] options) { Spinner s = new Spinner(this); s.setAdapter(new ArrayAdapter<String>(this, android.R.layout.simple_spinner_item, options)); ((ArrayAdapter<?>) s.getAdapter()).setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item); s.setBackgroundDrawable(round(C_PANEL_2, C_BORDER, 9)); return s; }
     private GradientDrawable round(int color, int border, int r) { GradientDrawable d = new GradientDrawable(); d.setColor(color); d.setCornerRadius(dp(r)); d.setStroke(dp(1), border); return d; }
     private LinearLayout.LayoutParams margin(int w, int h, int left, int bottom) { LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(w, h); p.leftMargin = dp(left); p.bottomMargin = dp(bottom); return p; }
