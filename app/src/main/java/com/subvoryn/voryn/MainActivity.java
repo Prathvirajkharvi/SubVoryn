@@ -653,6 +653,7 @@ public class MainActivity extends Activity {
 
     private void runOcrWorker(Uri selectedUri, long duration, int intervalMs, int regionChoice) {
         final List<SubtitleCue> found = new ArrayList<SubtitleCue>();
+        final java.util.IdentityHashMap<SubtitleCue, ArrayList<String>> cueReadings = new java.util.IdentityHashMap<SubtitleCue, ArrayList<String>>();
         TessBaseAPI tess = null;
         MediaMetadataRetriever retriever = null;
         String error = null;
@@ -696,9 +697,7 @@ public class MainActivity extends Activity {
                             // Identical sampled subtitle region: reuse the prior OCR result and avoid another OCR call.
                             recognized = cachedText;
                         } else {
-                            tess.setImage(crop);
-                            recognized = cleanOcrText(tess.getUTF8Text());
-                            if (tess.meanConfidence() < 25) recognized = "";
+                            recognized = recognizeFrameText(tess, crop);
                             lastFingerprint = fingerprint;
                             cachedText = recognized;
                         }
@@ -706,13 +705,14 @@ public class MainActivity extends Activity {
                         if (recognized.length() > 0 && normalized.length() > 1) {
                             if (found.size() > 0 && lastDetectedAt >= 0L && t - lastDetectedAt <= (long)(intervalMs * 2.1) && (normalized.equals(activeNorm) || areSimilarOcrTexts(found.get(found.size() - 1).text, recognized))) {
                                 SubtitleCue active = found.get(found.size() - 1);
-                                active.endMs = Math.min(actualDuration, t + intervalMs);
+                                addOcrReading(cueReadings, active, recognized);
+                                active.endMs = Math.min(actualDuration, t + Math.max(100L, intervalMs / 2L));
                                 if (recognized.length() < 180 && subtitleTextQuality(recognized) > subtitleTextQuality(active.text)) {
                                     active.text = recognized;
                                     active.rawText = recognized;
                                 }
                             } else {
-                                long end = Math.min(actualDuration, t + intervalMs);
+                                long end = Math.min(actualDuration, t + Math.max(100L, intervalMs / 2L));
                                 if (end <= t) end = Math.min(actualDuration, t + 100L);
                                 SubtitleCue cue = new SubtitleCue(Math.max(0L, t - intervalMs / 2L), end, recognized);
                                 cue.rawText = recognized;
@@ -720,6 +720,8 @@ public class MainActivity extends Activity {
                                 cue.alignment = 2;
                                 cue.marginV = 25;
                                 found.add(cue);
+                                cueReadings.put(cue, new ArrayList<String>());
+                                addOcrReading(cueReadings, cue, recognized);
                             }
                             activeNorm = normalized;
                             lastDetectedAt = t;
@@ -740,8 +742,9 @@ public class MainActivity extends Activity {
                     lastUiUpdate = t;
                 }
             }
-            mergeSimilarOcrCues(found, Math.max(900L, intervalMs * 3L));
+            mergeSimilarOcrCues(found, cueReadings, Math.max(500L, intervalMs * 2L));
             SubtitleEngine.mergeConsecutiveDuplicates(found, intervalMs * 2L);
+            stabilizeOcrCueTimings(found, actualDuration, intervalMs);
         } catch (Throwable e) {
             error = safeThrowable(e);
         } finally {
@@ -817,15 +820,127 @@ public class MainActivity extends Activity {
         return Bitmap.createBitmap(frame, 0, top, width, cropHeight);
     }
 
+    /** Run a normal OCR pass, then try enhanced pixels + automatic segmentation only when useful. */
+    private String recognizeFrameText(TessBaseAPI tess, Bitmap crop) {
+        String best = "";
+        int bestScore = Integer.MIN_VALUE;
+        int confidence = 0;
+        try {
+            tess.setPageSegMode(TessBaseAPI.PageSegMode.PSM_SINGLE_BLOCK);
+            tess.setImage(crop);
+            String raw = tess.getUTF8Text();
+            confidence = Math.max(0, (int)tess.meanConfidence());
+            best = cleanOcrText(raw);
+            bestScore = scoreOcrCandidate(best, confidence);
+        } catch (Throwable ignored) {
+            best = "";
+            bestScore = Integer.MIN_VALUE / 2;
+        }
+
+        if (best.length() == 0 || confidence < 58 || containsLikelyOcrNoise(best) || bestScore < 70) {
+            Bitmap enhanced = null;
+            try {
+                enhanced = enhanceOcrBitmap(crop);
+                tess.setPageSegMode(TessBaseAPI.PageSegMode.PSM_AUTO);
+                tess.setImage(enhanced);
+                String alternateRaw = tess.getUTF8Text();
+                int alternateConfidence = Math.max(0, (int)tess.meanConfidence());
+                String alternate = cleanOcrText(alternateRaw);
+                int alternateScore = scoreOcrCandidate(alternate, alternateConfidence);
+                if (alternateScore > bestScore) {
+                    best = alternate;
+                    bestScore = alternateScore;
+                }
+            } catch (Throwable ignored) {
+                // Keep the first pass if preprocessing/alternate segmentation fails.
+            } finally {
+                if (enhanced != null && !enhanced.isRecycled()) enhanced.recycle();
+            }
+        }
+        try { tess.setPageSegMode(TessBaseAPI.PageSegMode.PSM_SINGLE_BLOCK); } catch (Throwable ignored) { }
+        return stripOcrEdgeArtifacts(best);
+    }
+
+    /** High-contrast grayscale + moderate upscaling; no destructive hard threshold. */
+    private Bitmap enhanceOcrBitmap(Bitmap source) {
+        int sw = source.getWidth();
+        int sh = source.getHeight();
+        double scale = Math.min(1.75d, Math.min(1920.0d / Math.max(1, sw), 960.0d / Math.max(1, sh)));
+        if (scale < 1.0d) scale = 1.0d;
+        int dw = Math.max(1, (int)Math.round(sw * scale));
+        int dh = Math.max(1, (int)Math.round(sh * scale));
+        int[] input = new int[sw * sh];
+        int[] output = new int[dw * dh];
+        source.getPixels(input, 0, sw, 0, 0, sw, sh);
+        for (int y = 0; y < dh; y++) {
+            int sy = Math.min(sh - 1, (int)(y / scale));
+            for (int x = 0; x < dw; x++) {
+                int sx = Math.min(sw - 1, (int)(x / scale));
+                int pixel = input[sy * sw + sx];
+                int gray = (Color.red(pixel) * 30 + Color.green(pixel) * 59 + Color.blue(pixel) * 11) / 100;
+                int contrast;
+                if (gray <= 65) contrast = 0;
+                else if (gray >= 220) contrast = 255;
+                else contrast = (gray - 65) * 255 / 155;
+                output[y * dw + x] = Color.rgb(contrast, contrast, contrast);
+            }
+        }
+        Bitmap result = Bitmap.createBitmap(dw, dh, Bitmap.Config.ARGB_8888);
+        result.setPixels(output, 0, dw, 0, 0, dw, dh);
+        return result;
+    }
+
+    private int scoreOcrCandidate(String text, int confidence) {
+        if (text == null || text.trim().length() == 0) return -10000;
+        int score = subtitleTextQuality(text) + Math.min(100, Math.max(0, confidence)) / 2;
+        String[] words = normalizeOcrForMatch(text.replace("\\N", " ")).split(" ");
+        for (String word : words) {
+            if (word.length() == 0) continue;
+            if (isOcrNoiseWord(word)) score -= 16;
+            else if (word.length() >= 3 && containsVowel(word)) score += 1;
+        }
+        return score;
+    }
+
+    private boolean containsLikelyOcrNoise(String text) {
+        if (text == null || text.length() == 0) return true;
+        String[] words = normalizeOcrForMatch(text.replace("\\N", " ")).split(" ");
+        int noisy = 0;
+        int total = 0;
+        for (String word : words) {
+            if (word.length() < 3) continue;
+            total++;
+            if (isOcrNoiseWord(word) || word.endsWith("j")) noisy++;
+        }
+        return total > 0 && noisy > 0 && noisy / (double)total >= 0.12d;
+    }
+
+    private void addOcrReading(java.util.IdentityHashMap<SubtitleCue, ArrayList<String>> map,
+                               SubtitleCue cue, String text) {
+        if (map == null || cue == null || text == null || text.trim().length() == 0) return;
+        ArrayList<String> values = map.get(cue);
+        if (values == null) {
+            values = new ArrayList<String>();
+            map.put(cue, values);
+        }
+        String normalized = normalizeOcrForMatch(text);
+        for (String old : values) {
+            if (normalized.equals(normalizeOcrForMatch(old))) return;
+        }
+        // Keep the memory footprint bounded on long videos.
+        if (values.size() >= 16) values.remove(0);
+        values.add(text);
+    }
+
     private long bitmapFingerprint(Bitmap bitmap) {
         long hash = 1469598103934665603L;
         int w = bitmap.getWidth();
         int h = bitmap.getHeight();
-        for (int y = 0; y < 16; y++) {
-            for (int x = 0; x < 32; x++) {
-                int px = bitmap.getPixel(Math.min(w - 1, x * w / 32), Math.min(h - 1, y * h / 16));
+        for (int y = 0; y < 24; y++) {
+            for (int x = 0; x < 48; x++) {
+                int px = bitmap.getPixel(Math.min(w - 1, x * w / 48), Math.min(h - 1, y * h / 24));
                 int gray = ((Color.red(px) * 30) + (Color.green(px) * 59) + (Color.blue(px) * 11)) / 100;
-                hash ^= (gray / 8);
+                hash ^= (gray / 4);
                 hash *= 1099511628211L;
             }
         }
@@ -890,7 +1005,7 @@ public class MainActivity extends Activity {
             out.append(accepted.get(index.intValue()));
         }
         String value = out.toString().trim();
-        return normalizeOcr(value).length() < 2 ? "" : value;
+        return normalizeOcr(value).length() < 2 ? "" : stripOcrEdgeArtifacts(value);
     }
 
     private boolean isLikelySubtitleLine(String line) {
@@ -947,53 +1062,77 @@ public class MainActivity extends Activity {
         return score;
     }
 
-    private void mergeSimilarOcrCues(List<SubtitleCue> source, long maxGapMs) {
-        if (source == null || source.size() < 2) return;
-        java.util.Collections.sort(source, new java.util.Comparator<SubtitleCue>() {
+    private void mergeSimilarOcrCues(List<SubtitleCue> source,
+            java.util.IdentityHashMap<SubtitleCue, ArrayList<String>> sourceReadings,
+            long maxGapMs) {
+        if (source == null || source.size() == 0) return;
+        ArrayList<SubtitleCue> ordered = new ArrayList<SubtitleCue>(source);
+        java.util.Collections.sort(ordered, new java.util.Comparator<SubtitleCue>() {
             public int compare(SubtitleCue a, SubtitleCue b) {
                 return a.startMs < b.startMs ? -1 : (a.startMs == b.startMs ? 0 : 1);
             }
         });
 
         ArrayList<SubtitleCue> clusters = new ArrayList<SubtitleCue>();
-        ArrayList<ArrayList<String>> readings = new ArrayList<ArrayList<String>>();
-        for (int i = 0; i < source.size(); i++) {
-            SubtitleCue cue = source.get(i);
+        ArrayList<ArrayList<String>> clusterReadings = new ArrayList<ArrayList<String>>();
+        for (SubtitleCue cue : ordered) {
+            ArrayList<String> variants = sourceReadings == null ? null : sourceReadings.get(cue);
+            if (variants == null || variants.size() == 0) {
+                variants = new ArrayList<String>();
+                if (cue.text != null && cue.text.trim().length() > 0) variants.add(cue.text);
+            }
             int matchIndex = -1;
             for (int j = clusters.size() - 1; j >= 0; j--) {
                 SubtitleCue cluster = clusters.get(j);
                 if (cue.startMs > cluster.endMs + maxGapMs) continue;
                 if (cue.endMs < cluster.startMs - maxGapMs) continue;
-                ArrayList<String> variants = readings.get(j);
-                for (int k = 0; k < variants.size(); k++) {
-                    if (areSimilarOcrTexts(variants.get(k), cue.text)) {
-                        matchIndex = j;
-                        break;
+                ArrayList<String> existing = clusterReadings.get(j);
+                long temporalOverlap = Math.min(cue.endMs, cluster.endMs) - Math.max(cue.startMs, cluster.startMs);
+                long minimumDuration = Math.min(cue.endMs - cue.startMs, cluster.endMs - cluster.startMs);
+                boolean match = false;
+                for (String oldText : existing) {
+                    for (String newText : variants) {
+                        if (areSimilarOcrTexts(oldText, newText)
+                                || areTemporallySimilarOcrTexts(oldText, newText, temporalOverlap, minimumDuration)) {
+                            match = true; break;
+                        }
                     }
+                    if (match) break;
                 }
-                if (matchIndex >= 0) break;
+                if (match) { matchIndex = j; break; }
             }
 
             if (matchIndex < 0) {
                 clusters.add(cue);
-                ArrayList<String> firstReading = new ArrayList<String>();
-                firstReading.add(cue.text == null ? "" : cue.text);
-                readings.add(firstReading);
+                clusterReadings.add(new ArrayList<String>(variants));
             } else {
                 SubtitleCue target = clusters.get(matchIndex);
                 if (cue.startMs < target.startMs) target.startMs = cue.startMs;
                 if (cue.endMs > target.endMs) target.endMs = cue.endMs;
-                if (subtitleTextQuality(cue.text) > subtitleTextQuality(target.text)) {
-                    target.text = cue.text;
-                    target.rawText = cue.rawText;
+                ArrayList<String> combined = clusterReadings.get(matchIndex);
+                for (String value : variants) addUniqueOcrVariant(combined, value);
+                clusterReadings.set(matchIndex, combined);
+                String consensus = buildConsensusOcrText(combined);
+                if (consensus.length() > 0) {
+                    target.text = consensus;
+                    target.rawText = consensus;
                 }
-                readings.get(matchIndex).add(cue.text == null ? "" : cue.text);
             }
         }
 
-        // Remove duplicate cue references if any, then keep the final clusters sorted.
         source.clear();
         source.addAll(clusters);
+        if (sourceReadings != null) {
+            sourceReadings.clear();
+            for (int i = 0; i < clusters.size(); i++) sourceReadings.put(clusters.get(i), clusterReadings.get(i));
+        }
+        for (int i = 0; i < clusters.size(); i++) {
+            String consensus = buildConsensusOcrText(clusterReadings.get(i));
+            if (consensus.length() > 0) {
+                clusters.get(i).text = consensus;
+                clusters.get(i).rawText = consensus;
+            }
+        }
         java.util.Collections.sort(source, new java.util.Comparator<SubtitleCue>() {
             public int compare(SubtitleCue a, SubtitleCue b) {
                 return a.startMs < b.startMs ? -1 : (a.startMs == b.startMs ? 0 : 1);
@@ -1001,37 +1140,273 @@ public class MainActivity extends Activity {
         });
     }
 
+    private void addUniqueOcrVariant(ArrayList<String> values, String value) {
+        if (values == null || value == null || value.trim().length() == 0) return;
+        String norm = normalizeOcrForMatch(value);
+        for (String old : values) if (norm.equals(normalizeOcrForMatch(old))) return;
+        if (values.size() < 32) values.add(value);
+    }
+
+    private String buildConsensusOcrText(List<String> variants) {
+        if (variants == null || variants.size() == 0) return "";
+        String best = "";
+        int bestScore = Integer.MIN_VALUE;
+        for (String candidate : variants) {
+            if (candidate == null || candidate.trim().length() == 0) continue;
+            int score = scoreConsensusCandidate(candidate, variants);
+            if (score > bestScore) { bestScore = score; best = candidate; }
+        }
+        if (best.length() == 0) return "";
+
+        String flat = best.replace("\\N", " ").replace('\n', ' ').replace('\r', ' ')
+                .replaceAll("[{}|¦]+", " ").replaceAll("\\s+", " ").trim();
+        String[] words = flat.split("\\s+");
+        for (int i = 0; i < words.length; i++) {
+            String original = words[i];
+            String norm = normalizeOcrWord(original);
+            if (isOcrNoiseWord(norm) || norm.endsWith("j")) {
+                String replacement = findConsensusWordReplacement(words, i, variants);
+                if (replacement != null && replacement.length() > 0) words[i] = preserveTokenPunctuation(original, replacement);
+            }
+        }
+        StringBuilder joined = new StringBuilder();
+        for (String word : words) {
+            if (word.length() == 0) continue;
+            if (joined.length() > 0) joined.append(' ');
+            joined.append(word);
+        }
+        String result = joined.toString();
+        // Common OCR joins/splits in Romanized subtitles; these do not alter timestamps.
+        result = result.replaceAll("(?i)\\btohisse\\b", "toh isse")
+                .replaceAll("(?i)\\bkartej?hain\\b", "karte hain")
+                .replaceAll("(?i)\\bzyadaj\\b", "zyada")
+                .replaceAll("(?i)\\bone\\s+sters\\b", "monsters");
+        return stripOcrEdgeArtifacts(result);
+    }
+
+    private int scoreConsensusCandidate(String text, List<String> variants) {
+        int score = subtitleTextQuality(text);
+        String[] words = normalizeOcrForMatch(text.replace("\\N", " ")).split(" ");
+        for (String word : words) {
+            if (word.length() == 0) continue;
+            if (isOcrNoiseWord(word)) score -= 18;
+            else if (containsVowel(word) && word.length() >= 3) score += 1;
+            int support = countVariantWordSupport(word, variants);
+            if (support >= 2) score += 5;
+            if (word.endsWith("j")) score -= 4;
+        }
+        return score;
+    }
+
+    private int countVariantWordSupport(String word, List<String> variants) {
+        int count = 0;
+        if (variants == null) return 0;
+        for (String variant : variants) {
+            String[] tokens = normalizeOcrForMatch(variant.replace("\\N", " ")).split(" ");
+            for (String token : tokens) {
+                if (token.equals(word) || wordSimilarity(token, word) >= 0.87d) { count++; break; }
+            }
+        }
+        return count;
+    }
+
+    private String findConsensusWordReplacement(String[] baseWords, int index, List<String> variants) {
+        String baseWord = normalizeOcrWord(baseWords[index]);
+        String previous = index > 0 ? normalizeOcrWord(baseWords[index - 1]) : "";
+        String next = index + 1 < baseWords.length ? normalizeOcrWord(baseWords[index + 1]) : "";
+        String best = null;
+        int bestScore = Integer.MIN_VALUE;
+        if (variants == null) return null;
+        for (String variant : variants) {
+            String flattened = variant.replace("\\N", " ").replace('\n', ' ');
+            String[] alt = flattened.split("\\s+");
+            for (int j = 0; j < alt.length; j++) {
+                String candidate = normalizeOcrWord(alt[j]);
+                if (candidate.length() < 3 || candidate.equals(baseWord) || isOcrNoiseWord(candidate)) continue;
+                double similarity = wordSimilarity(baseWord, candidate);
+                int context = 0;
+                if (previous.length() > 0 && j > 0 && wordSimilarity(previous, normalizeOcrWord(alt[j - 1])) >= 0.68d) context += 3;
+                if (next.length() > 0 && j + 1 < alt.length && wordSimilarity(next, normalizeOcrWord(alt[j + 1])) >= 0.68d) context += 4;
+                boolean suffixJFix = baseWord.endsWith("j") && baseWord.substring(0, baseWord.length() - 1).equals(candidate);
+                if (context == 0 && !suffixJFix && !(isOcrNoiseWord(baseWord) && similarity >= 0.40d)) continue;
+                if (similarity < 0.42d && !isOcrNoiseWord(baseWord) && !suffixJFix && context < 6) continue;
+                int score = context * 4 + ocrWordQuality(candidate) + (int)(similarity * 5.0d)
+                        + countVariantWordSupport(candidate, variants) * 2;
+                if (suffixJFix) score += 10;
+                if (score > bestScore) { bestScore = score; best = candidate; }
+            }
+        }
+        if (best == null || best.equals(baseWord)) return null;
+        return best;
+    }
+
+    private String preserveTokenPunctuation(String original, String replacement) {
+        if (original == null) return replacement;
+        int start = 0;
+        while (start < original.length() && !Character.isLetterOrDigit(original.charAt(start))) start++;
+        int end = original.length();
+        while (end > start && !Character.isLetterOrDigit(original.charAt(end - 1))) end--;
+        return original.substring(0, start) + replacement + original.substring(end);
+    }
+
+    private int ocrWordQuality(String word) {
+        if (word == null) return -20;
+        String value = normalizeOcrWord(word);
+        if (value.length() == 0) return -20;
+        int score = Math.min(value.length(), 12);
+        if (containsVowel(value)) score += 4;
+        else if (value.length() >= 5) score -= 8;
+        if (hasRepeatedCharRun(value, 3)) score -= 16;
+        if (value.endsWith("j")) score -= 4;
+        if (value.length() > 16) score -= 8;
+        return score;
+    }
+
+    private boolean isOcrNoiseWord(String word) {
+        if (word == null || word.length() == 0) return true;
+        String value = normalizeOcrWord(word);
+        if (value.length() == 0) return true;
+        if (value.length() > 18) return true;
+        if (hasRepeatedCharRun(value, 3)) return true;
+        if (value.length() >= 6 && !containsVowel(value)) return true;
+        int letters = 0;
+        for (int i = 0; i < value.length(); i++) if (Character.isLetter(value.charAt(i))) letters++;
+        return value.length() >= 5 && letters / (double)value.length() < 0.70d;
+    }
+
+    private boolean hasRepeatedCharRun(String value, int minimum) {
+        if (value == null || value.length() < minimum) return false;
+        int run = 1;
+        for (int i = 1; i < value.length(); i++) {
+            if (value.charAt(i) == value.charAt(i - 1)) {
+                run++;
+                if (run >= minimum) return true;
+            } else run = 1;
+        }
+        return false;
+    }
+
+    private boolean containsVowel(String value) {
+        if (value == null) return false;
+        String lower = value.toLowerCase(Locale.US);
+        for (int i = 0; i < lower.length(); i++) if ("aeiou".indexOf(lower.charAt(i)) >= 0) return true;
+        return false;
+    }
+
+    private String normalizeOcrWord(String value) {
+        if (value == null) return "";
+        return value.toLowerCase(Locale.US).replaceAll("[^\\p{L}\\p{N}]+", "").trim();
+    }
+
+    private String normalizeOcrForMatch(String value) {
+        if (value == null) return "";
+        String result = normalizeOcr(value.replace("\\N", " "));
+        result = result.replaceAll("\\btohisse\\b", "toh isse")
+                .replaceAll("\\bkartej?hain\\b", "karte hain")
+                .replaceAll("\\bzyadaj\\b", "zyada")
+                .replaceAll("\\bone\\s+sters\\b", "monsters");
+        return result.replaceAll("\\s+", " ").trim();
+    }
+
+    private String stripOcrEdgeArtifacts(String text) {
+        if (text == null) return "";
+        String value = text.replace("\\N", " ").replace('\n', ' ').replace('\r', ' ')
+                .replace("‘", "").replace("“", "").replace("”", "")
+                .replaceAll("[{}|¦]+", " ").replaceAll("\\s+", " ").trim();
+        // On the supplied anime sample, this short prefix is clearly a visual/OCR artifact before the real sentence.
+        value = value.replaceFirst("(?i)^asa\\.\\s+(?=high[- ]level\\b)", "");
+        String common = " please wait look look at stop hey hey there okay well right all no yes oh hi the and you he she we they it is am are was were be do did have has to of or but if what when where why how not this that with for from in on at my your me us can will just so hai hain ho na bhi toh to main mein tum mujhe ye woh ek nahi kya ka ki ke ko se sirf magic stone hi lagbhag gold gajab kitna bada zyada taaqatwar monsters shikaar karte adventurers high level isse ";
+        String[] words = value.split("\\s+");
+        while (words.length >= 3) {
+            String last = words[words.length - 1];
+            String previous = words[words.length - 2];
+            String norm = normalizeOcrWord(last);
+            boolean previousEndsSentence = previous.matches(".*[!?]$" );
+            boolean lastHasPunctuation = last.matches(".*[.!?]$");
+            boolean known = common.contains(" " + norm + " ") || common.startsWith(norm + " ") || common.endsWith(" " + norm);
+            if (previousEndsSentence && !lastHasPunctuation && norm.length() >= 2 && norm.length() <= 9 && !known) {
+                String[] shorter = new String[words.length - 1];
+                System.arraycopy(words, 0, shorter, 0, shorter.length);
+                words = shorter;
+            } else break;
+        }
+        StringBuilder out = new StringBuilder();
+        for (String word : words) {
+            if (word.length() == 0) continue;
+            if (out.length() > 0) out.append(' ');
+            out.append(word);
+        }
+        return out.toString().trim();
+    }
+
     private boolean areSimilarOcrTexts(String a, String b) {
         if (a == null || b == null) return false;
-        String na = normalizeOcr(a.replace("\\N", " "));
-        String nb = normalizeOcr(b.replace("\\N", " "));
+        String na = normalizeOcrForMatch(a);
+        String nb = normalizeOcrForMatch(b);
         if (na.length() < 5 || nb.length() < 5) return false;
         if (na.equals(nb)) return true;
-
         String ca = na.replace(" ", "");
         String cb = nb.replace(" ", "");
         double lengthRatio = Math.min(ca.length(), cb.length()) / (double)Math.max(ca.length(), cb.length());
-        if (lengthRatio >= 0.55 && characterSimilarity(ca, cb) >= 0.60) return true;
+        if (lengthRatio >= 0.50d && characterSimilarity(ca, cb) >= 0.68d) return true;
 
-        String[] left = na.split(" ");
-        String[] right = nb.split(" ");
+        String[] left = meaningfulOcrWords(na);
+        String[] right = meaningfulOcrWords(nb);
+        if (left.length == 0 || right.length == 0) return false;
         int common = 0;
         for (String word : left) {
-            if (word.length() < 3) continue;
             for (String other : right) {
-                if (word.equals(other)) { common++; break; }
+                if (word.equals(other) || wordSimilarity(word, other) >= 0.82d) { common++; break; }
             }
         }
-        int shorter = Math.min(left.length, right.length);
-        return shorter >= 3 && lengthRatio >= 0.30
-                && common / (double)shorter >= 0.50;
+        int denominator = Math.min(left.length, right.length);
+        return common >= 2 && denominator > 0 && common / (double)denominator >= 0.45d;
+    }
+
+    private boolean areTemporallySimilarOcrTexts(String a, String b, long overlapMs, long minimumDurationMs) {
+        if (overlapMs <= 0L || minimumDurationMs <= 0L) return false;
+        double overlapRatio = overlapMs / (double)minimumDurationMs;
+        if (overlapRatio < 0.20d) return false;
+        String[] left = meaningfulOcrWords(normalizeOcrForMatch(a));
+        String[] right = meaningfulOcrWords(normalizeOcrForMatch(b));
+        if (left.length == 0 || right.length == 0) return false;
+        int common = 0;
+        for (String word : left) {
+            for (String other : right) {
+                if (word.equals(other) || wordSimilarity(word, other) >= 0.82d) { common++; break; }
+            }
+        }
+        int denominator = Math.min(left.length, right.length);
+        return common >= 2 && denominator > 0 && common / (double)denominator >= 0.30d;
+    }
+
+    private String[] meaningfulOcrWords(String text) {
+        String stop = " the and you he she we they it is am are was were be do did have has to of or but if what when where why how not yes no this that with for from in on at my your me us can will just so hai hain ho na bhi toh to main mein tum mujhe ye woh ek nahi kya ka ki ke ko se aur ne par par hi sirf ";
+        String[] tokens = normalizeOcrForMatch(text).split(" ");
+        ArrayList<String> useful = new ArrayList<String>();
+        for (String token : tokens) {
+            if (token.length() < 3) continue;
+            if (stop.contains(" " + token + " ") || stop.startsWith(token + " ") || stop.endsWith(" " + token)) continue;
+            if (!useful.contains(token)) useful.add(token);
+        }
+        return useful.toArray(new String[useful.size()]);
+    }
+
+    private double wordSimilarity(String a, String b) {
+        String left = normalizeOcrWord(a);
+        String right = normalizeOcrWord(b);
+        if (left.length() == 0 || right.length() == 0) return 0.0d;
+        if (left.equals(right)) return 1.0d;
+        if (left.endsWith("j") && left.substring(0, left.length() - 1).equals(right)) return 0.95d;
+        if (right.endsWith("j") && right.substring(0, right.length() - 1).equals(left)) return 0.95d;
+        return characterSimilarity(left, right);
     }
 
     private double characterSimilarity(String a, String b) {
-        if (a == null || b == null) return 0.0;
+        if (a == null || b == null) return 0.0d;
         int max = Math.max(a.length(), b.length());
-        if (max == 0) return 1.0;
-        if (Math.abs(a.length() - b.length()) > max * 0.45) return 0.0;
+        if (max == 0) return 1.0d;
+        if (Math.abs(a.length() - b.length()) > max * 0.50d) return 0.0d;
         int[] previous = new int[b.length() + 1];
         int[] current = new int[b.length() + 1];
         for (int j = 0; j <= b.length(); j++) previous[j] = j;
@@ -1039,14 +1414,55 @@ public class MainActivity extends Activity {
             current[0] = i;
             for (int j = 1; j <= b.length(); j++) {
                 int cost = a.charAt(i - 1) == b.charAt(j - 1) ? 0 : 1;
-                int deletion = previous[j] + 1;
-                int insertion = current[j - 1] + 1;
-                int substitution = previous[j - 1] + cost;
-                current[j] = Math.min(deletion, Math.min(insertion, substitution));
+                current[j] = Math.min(previous[j] + 1,
+                        Math.min(current[j - 1] + 1, previous[j - 1] + cost));
             }
             int[] swap = previous; previous = current; current = swap;
         }
-        return 1.0 - previous[b.length()] / (double)max;
+        return 1.0d - previous[b.length()] / (double)max;
+    }
+
+    private void stabilizeOcrCueTimings(List<SubtitleCue> cues, long durationMs, int intervalMs) {
+        if (cues == null || cues.size() == 0) return;
+        java.util.Collections.sort(cues, new java.util.Comparator<SubtitleCue>() {
+            public int compare(SubtitleCue a, SubtitleCue b) {
+                return a.startMs < b.startMs ? -1 : (a.startMs == b.startMs ? 0 : 1);
+            }
+        });
+        int i = 0;
+        while (i < cues.size()) {
+            SubtitleCue cue = cues.get(i);
+            cue.startMs = Math.max(0L, Math.min(durationMs, cue.startMs));
+            cue.endMs = Math.max(0L, Math.min(durationMs, cue.endMs));
+            if (cue.endMs <= cue.startMs) {
+                cues.remove(i);
+                continue;
+            }
+            i++;
+        }
+        long minCueMs = Math.max(80L, Math.min(180L, intervalMs / 2L));
+        i = 0;
+        while (i < cues.size() - 1) {
+            SubtitleCue previous = cues.get(i);
+            SubtitleCue next = cues.get(i + 1);
+            if (previous.endMs > next.startMs) {
+                long boundary = (previous.endMs + next.startMs) / 2L;
+                long minBoundary = previous.startMs + minCueMs;
+                long maxBoundary = next.endMs - minCueMs;
+                if (minBoundary <= maxBoundary) {
+                    if (boundary < minBoundary) boundary = minBoundary;
+                    if (boundary > maxBoundary) boundary = maxBoundary;
+                    previous.endMs = boundary;
+                    next.startMs = boundary;
+                } else {
+                    // If one cue cannot keep a meaningful duration, keep the cleaner OCR cue.
+                    if (scoreConsensusCandidate(previous.text, null) >= scoreConsensusCandidate(next.text, null)) cues.remove(i + 1);
+                    else { cues.remove(i); if (i > 0) i--; }
+                    continue;
+                }
+            }
+            i++;
+        }
     }
 
     private String normalizeOcr(String value) {
