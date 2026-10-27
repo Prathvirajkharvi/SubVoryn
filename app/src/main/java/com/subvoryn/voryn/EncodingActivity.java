@@ -106,8 +106,9 @@ public class EncodingActivity extends Activity {
     private String lastEncoderLog = "";
 
     private LinearLayout shell;
+    private android.widget.ScrollView screenScroll;
     private TextView videoLabel, subtitleLabel, fontLabel, outputFolderLabel;
-    private TextView summaryLabel, commandPreview, progressLabel, progressDetails, outputLabel, errorLogLabel;
+    private TextView summaryLabel, commandPreview, startHint, progressLabel, progressDetails, outputLabel, errorLogLabel;
     private EditText filenameInput, customFpsInput;
     private Spinner resolutionSpinner, fpsSpinner, presetSpinner, audioSpinner;
     private SeekBar crfSeek;
@@ -133,6 +134,7 @@ public class EncodingActivity extends Activity {
 
     private void buildScreen() {
         android.widget.ScrollView scroll = new android.widget.ScrollView(this);
+        screenScroll = scroll;
         scroll.setFillViewport(true);
         scroll.setBackgroundColor(C_BG);
         LinearLayout content = new LinearLayout(this);
@@ -245,6 +247,12 @@ public class EncodingActivity extends Activity {
             }
         });
         summaryCard.addView(commandButton, fullWidth());
+        startHint = text("Select both a video and subtitle file to enable encoding.", 11, C_MUTED, false);
+        summaryCard.addView(startHint, margin(-1, -2, 0, 5));
+        startButton = button("Start Encoding", true);
+        startButton.setEnabled(false);
+        startButton.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { startEncoding(); } });
+        summaryCard.addView(startButton, margin(-1, dp(48), 0, 8));
         commandPreview = text("", 11, C_MUTED, false);
         commandPreview.setGravity(Gravity.TOP);
         commandPreview.setTextIsSelectable(true);
@@ -282,14 +290,9 @@ public class EncodingActivity extends Activity {
         progressCard.addView(errorLogLabel, margin(-1, -2, 0, 8));
         outputLabel = text("", 12, C_TEXT, false);
         progressCard.addView(outputLabel, margin(-1, -2, 0, 8));
-        LinearLayout progressButtons = new LinearLayout(this);
         cancelButton = button("Cancel Encoding", false);
         cancelButton.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { confirmCancel(); } });
-        progressButtons.addView(cancelButton, new LinearLayout.LayoutParams(0, dp(44), 1));
-        startButton = button("Start Encoding", true);
-        startButton.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { startEncoding(); } });
-        progressButtons.addView(startButton, new LinearLayout.LayoutParams(0, dp(44), 1));
-        progressCard.addView(progressButtons, fullWidth());
+        progressCard.addView(cancelButton, fullWidth());
         LinearLayout outputButtons = new LinearLayout(this);
         openOutputButton = button("Open Output", false);
         openOutputButton.setEnabled(false);
@@ -380,6 +383,13 @@ public class EncodingActivity extends Activity {
         if (fontsTreeUri == null) fontLabel.setText("No custom font folder selected. System fonts will be used.");
         if (outputTreeUri == null) outputFolderLabel.setText("Download/SubVoryn/Encoded/");
         refreshProposedFilename();
+        boolean inputsReady = videoUri != null && subtitleUri != null;
+        if (startButton != null) startButton.setEnabled(inputsReady && !encoding);
+        if (startHint != null) {
+            if (encoding) startHint.setText("Encoding is running. Live status is shown below.");
+            else if (!inputsReady) startHint.setText("Select both a video and subtitle file to enable encoding.");
+            else startHint.setText("Ready to encode. Tap Start Encoding; the screen will scroll to live progress.");
+        }
     }
 
     private void pickDocument(int requestCode) {
@@ -529,6 +539,14 @@ public class EncodingActivity extends Activity {
         openOutputButton.setEnabled(false);
         shareOutputButton.setEnabled(false);
         progressCard.setVisibility(View.VISIBLE);
+        if (startHint != null) startHint.setText("Preparing the files and verifying the FFmpeg engine…");
+        if (screenScroll != null) {
+            progressCard.post(new Runnable() {
+                public void run() {
+                    if (screenScroll != null) screenScroll.smoothScrollTo(0, Math.max(0, progressCard.getTop()));
+                }
+            });
+        }
         encodeProgress.setIndeterminate(true);
         encodeProgress.setProgress(0);
         progressLabel.setText("Preparing input files and verifying the bundled FFmpeg engine…");
@@ -695,6 +713,8 @@ public class EncodingActivity extends Activity {
                                         public void run() {
                                             encoding = false;
                                             lastOutputUri = finalUri;
+                                            if (startHint != null) startHint.setText("Encoding complete. Output saved below; ready for another job.");
+                                            startButton.setEnabled(videoUri != null && subtitleUri != null);
                                             encodeProgress.setIndeterminate(false);
                                             encodeProgress.setProgress(100);
                                             progressLabel.setText("Encoding complete · 100%");
@@ -795,7 +815,8 @@ public class EncodingActivity extends Activity {
         encodeProgress.setIndeterminate(false);
         progressLabel.setText("Encoding cancelled");
         progressDetails.setText("The incomplete temporary output was removed. Source files were not changed.");
-        startButton.setEnabled(true);
+        startButton.setEnabled(videoUri != null && subtitleUri != null);
+        if (startHint != null) startHint.setText("Encoding was cancelled. You can review settings and start again.");
         cancelButton.setEnabled(false);
         if (activeTempOutput != null) deleteQuietly(activeTempOutput);
         toast("Encoding cancelled.");
@@ -806,7 +827,8 @@ public class EncodingActivity extends Activity {
         encodeProgress.setIndeterminate(false);
         progressLabel.setText("Not completed");
         progressDetails.setText(message == null ? "Unknown error." : message);
-        startButton.setEnabled(true);
+        startButton.setEnabled(videoUri != null && subtitleUri != null);
+        if (startHint != null) startHint.setText("Encoding did not complete. Review the error details below, then retry.");
         cancelButton.setEnabled(false);
         if (activeTempOutput != null && (cancelRequested || !activeTempOutput.isFile())) deleteQuietly(activeTempOutput);
         toast("SubVoryn: " + clip(message == null ? "Encoding failed." : message, 180));
