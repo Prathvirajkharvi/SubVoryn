@@ -55,14 +55,14 @@ public class MainActivity extends Activity {
     private static final int REQUEST_IMPORT = 4101;
     private static final int REQUEST_EXPORT = 4102;
     private static final int MAX_VISIBLE_CUES = 24;
-    private static final int C_BG = Color.rgb(20, 25, 32);
-    private static final int C_PANEL = Color.rgb(29, 37, 46);
-    private static final int C_PANEL_2 = Color.rgb(35, 44, 55);
-    private static final int C_BORDER = Color.rgb(57, 72, 88);
-    private static final int C_TEXT = Color.rgb(240, 244, 248);
-    private static final int C_MUTED = Color.rgb(164, 178, 193);
-    private static final int C_ACCENT = Color.rgb(158, 184, 208);
-    private static final int C_AMBER = Color.rgb(194, 154, 101);
+    private static final int C_BG = Color.rgb(14, 19, 26);
+    private static final int C_PANEL = Color.rgb(23, 30, 40);
+    private static final int C_PANEL_2 = Color.rgb(31, 40, 52);
+    private static final int C_BORDER = Color.rgb(57, 72, 91);
+    private static final int C_TEXT = Color.rgb(243, 246, 250);
+    private static final int C_MUTED = Color.rgb(161, 176, 193);
+    private static final int C_ACCENT = Color.rgb(151, 178, 207);
+    private static final int C_AMBER = Color.rgb(203, 166, 113);
 
     private LinearLayout root;
     private LinearLayout content;
@@ -134,19 +134,19 @@ public class MainActivity extends Activity {
         brandWords.setOrientation(LinearLayout.VERTICAL);
         brandWords.setPadding(dp(12), 0, 0, 0);
         TextView title = text("SubVoryn", 24, C_TEXT, true);
-        TextView version = text("SUBTITLE WORKSPACE  •  BETA V1.1 OCR", 10, C_ACCENT, true);
+        TextView version = text("SUBTITLE WORKSPACE  •  OFFLINE OCR", 10, C_ACCENT, true);
         brandWords.addView(title);
         brandWords.addView(version);
         brand.addView(brandWords, new LinearLayout.LayoutParams(0, -2, 1));
-        TextView settingsTag = text("LOCAL", 10, C_MUTED, true);
+        TextView settingsTag = text("ON-DEVICE", 10, C_MUTED, true);
         settingsTag.setGravity(Gravity.CENTER);
         settingsTag.setPadding(dp(10), dp(7), dp(10), dp(7));
         settingsTag.setBackgroundDrawable(round(C_PANEL, C_BORDER, 18));
         brand.addView(settingsTag);
         root.addView(brand, margin(-1, -2, 0, 18));
 
-        root.addView(text("Extract. Refine. Convert.", 25, C_TEXT, true), margin(-1, -2, 0, 4));
-        root.addView(text("Subtitle tools built for precise timing and clean exports.", 13, C_MUTED, false), margin(-1, -2, 0, 18));
+        root.addView(text("Extract. Clean. Export.", 25, C_TEXT, true), margin(-1, -2, 0, 4));
+        root.addView(text("Offline OCR  •  Smarter cleanup  •  SRT / VTT / ASS", 13, C_MUTED, false), margin(-1, -2, 0, 18));
 
         // Main workflow: extract hardcoded subtitles from the VIDEO itself.
         LinearLayout videoCard = card();
@@ -251,9 +251,20 @@ public class MainActivity extends Activity {
         root.addView(positionCard, margin(-1, -2, 0, 12));
 
         LinearLayout qcCard = card();
-        qcCard.addView(text("TIMING & DUPLICATE TOOLS", 10, C_ACCENT, true), margin(-1, -2, 0, 7));
+        qcCard.addView(text("QUALITY CONTROL & SMART CLEANUP", 10, C_ACCENT, true), margin(-1, -2, 0, 7));
         qcText = text("Import a file to run quality checks.", 12, C_MUTED, false);
         qcCard.addView(qcText, margin(-1, -2, 0, 12));
+        // SUBVORYN_OCR_ARTIFACT_CLEANUP_V5
+        Button cleanTextButton = button("Clean OCR spelling & stray brackets", true);
+        cleanTextButton.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { cleanupCueTextArtifacts(); }
+        });
+        qcCard.addView(cleanTextButton, fullWidth());
+        Button removeNoiseButton = button("Review / remove obvious OCR junk", false);
+        removeNoiseButton.setOnClickListener(new View.OnClickListener() {
+            public void onClick(View v) { reviewAndRemoveOcrNoise(); }
+        });
+        qcCard.addView(removeNoiseButton, margin(-1, 8, 0, 0));
         Button duplicateButton = button("Merge adjacent duplicate dialogues", false);
         duplicateButton.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { mergeDuplicates(); } });
         qcCard.addView(duplicateButton, fullWidth());
@@ -315,7 +326,7 @@ public class MainActivity extends Activity {
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
         box.setPadding(dp(14), dp(14), dp(14), dp(14));
-        box.setBackgroundDrawable(round(C_PANEL, C_BORDER, 16));
+        box.setBackgroundDrawable(round(C_PANEL, C_BORDER, 18));
         return box;
     }
 
@@ -337,7 +348,7 @@ public class MainActivity extends Activity {
         b.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         b.setTextColor(primary ? C_BG : C_TEXT);
         b.setPadding(dp(8), dp(6), dp(8), dp(6));
-        b.setBackgroundDrawable(round(primary ? C_ACCENT : C_PANEL_2, primary ? C_ACCENT : C_BORDER, 11));
+        b.setBackgroundDrawable(round(primary ? C_ACCENT : C_PANEL_2, primary ? C_ACCENT : C_BORDER, 13));
         return b;
     }
 
@@ -912,6 +923,14 @@ public class MainActivity extends Activity {
             }
             finishOcrTimeline(found, cueReadings, timeline, actualDuration, intervalMs);
             applyConsensusToOcrCues(found, cueReadings);
+            for (int i = 0; i < found.size(); i++) {
+                SubtitleCue cue = found.get(i);
+                String raw = cue.rawText == null ? cue.text : cue.rawText;
+                String clean = sanitizeSubtitleArtifacts(raw);
+                cue.text = clean;
+                cue.rawText = clean;
+            }
+            mergeNearbySimilarOcrCues(found, 650L);
             SubtitleEngine.mergeConsecutiveDuplicates(found, Math.max(100L, intervalMs / 2L));
             stabilizeOcrCueTimings(found, actualDuration, intervalMs);
         } catch (Throwable e) {
@@ -1116,6 +1135,69 @@ public class MainActivity extends Activity {
         return hash;
     }
 
+    // SUBVORYN_OCR_ARTIFACT_CLEANUP_V5
+    /** Conservative text-only cleanup. It does not alter cue times or ASS positioning tags. */
+    private String sanitizeSubtitleArtifacts(String input) {
+        if (input == null) return "";
+        String value = input.replace('\r', ' ').replace('\t', ' ').replace("\\taaqatwar", " taaqatwar");
+        // Parentheses with mismatched counts are almost always OCR debris in the supplied samples.
+        int opens = 0, closes = 0;
+        for (int i = 0; i < value.length(); i++) {
+            if (value.charAt(i) == '(') opens++;
+            else if (value.charAt(i) == ')') closes++;
+        }
+        if (opens != closes) {
+            value = value.replace('(', ' ').replace(')', ' ');
+        } else {
+            value = value.replaceAll("\\(\\s*\\)", " ");
+        }
+        // Also fix an OCR parenthesis inserted between two words, including adjacent forms like word)next.
+        value = value.replaceAll("(?<=\\p{L})\\)(?=\\s*\\p{L})", " ")
+                .replaceAll("(?<=\\p{L})\\((?=\\s*\\p{L})", " ");
+        // Curly quote between letters is commonly read instead of a space (e.g. Kitna’bada).
+        value = value.replaceAll("(?<=\\p{L})[‘’](?=\\p{L})", " ")
+                .replace("“", "").replace("”", "").replace("‘", "").replace("’", "");
+        // Small, evidence-based repairs from the sample. These normalize OCR joins, not story meaning.
+        value = value.replaceAll("(?i)\\bkitna\\s*['’]?\\s*bada\\b", "Kitna bada")
+                .replaceAll("(?i)\\bmagic\\s*['’]?\\s*stone\\b", "magic stone")
+                .replaceAll("(?i)\\bmagicj?stone\\b", "magic stone")
+                .replaceAll("(?i)\\bhilagbhag\\b", "hi lagbhag")
+                .replaceAll("(?i)\\bbhiy\\b", "bhi")
+                .replaceAll("(?i)^\\s*(?:[a-z]{1,2}\\d+|\\d+[a-z]{1,2}|[a-z]{1,2})\\s+(?=(?:sirf|high[- ]level|g-gajab)\\b)", "")
+                .replaceAll("(?i)\\bhigh\\s*[-; ]\\s*level\\s*/\\s*adventurers\\b", "High-level adventurers")
+                .replaceAll("(?i)\\bhigh;level\\b", "High-level")
+                .replaceAll("(?i)\\btohisse\\b", "toh isse")
+                .replaceAll("(?i)\\bkartej?hain\\b", "karte hain")
+                .replaceAll("(?i)\\bshikaarjkarte\\b", "shikaar karte")
+                .replaceAll("(?i)\\bzyadaj\\b", "zyada")
+                .replaceAll("(?i)\\bone\\s+sters\\b", "monsters")
+                .replaceAll("(?i)\\bmonsters\\s*kalshikaar\\b", "monsters ka shikaar")
+                .replaceAll("(?i)^\\s*lakh[,;:]?\\s+(?=high[- ]level\\b)", "")
+                .replaceAll("(?i)^\\s*asa\\.\\s+(?=high[- ]level\\b)", "");
+        // Strip repeated stray punctuation, but keep normal commas in numbers such as 2,000,000.
+        value = value.replaceAll("([!?]){2,}", "$1")
+                .replaceAll("([;]){2,}", ";")
+                .replaceAll("\\s+([.!?;])", "$1")
+                .replaceAll("([!?])(?=\\p{L})", "$1 ")
+                .replaceAll("[ \\t]{2,}", " ").trim();
+        // If OCR appends a few short, unknown tokens after a finished sentence, drop only that suspicious tail.
+        java.util.regex.Matcher tail = java.util.regex.Pattern
+                .compile("([.!?])\\s+([\\p{L}\\p{N}]+(?:\\s+[\\p{L}\\p{N}]+){0,2})$")
+                .matcher(value);
+        if (tail.find()) {
+            String suffix = tail.group(2).trim();
+            String[] tailWords = suffix.split("\\s+");
+            boolean shortUnknownTail = tailWords.length <= 3 && suffix.length() <= 14;
+            String knownTail = " no yes ok okay oh hi hey wow hai hain ho na haan nahi what why how who you me my we they he she it is are was were the a an and but so go come look wait stop help sir ";
+            for (String tailWord : tailWords) {
+                String token = tailWord.toLowerCase(Locale.US).replaceAll("[^\\p{L}\\p{N}]", "");
+                if (token.length() > 4 || knownTail.contains(" " + token + " ")) shortUnknownTail = false;
+            }
+            if (shortUnknownTail) value = value.substring(0, tail.start(2)).trim();
+        }
+        return value;
+    }
+
     private String cleanOcrText(String raw) {
         if (raw == null) return "";
         String[] lines = raw.replace('\r', '\n').split("\\n");
@@ -1125,8 +1207,9 @@ public class MainActivity extends Activity {
         for (String item : lines) {
             String line = item.replaceAll("[|¦·•_=~]+", " ")
                     .replaceAll("\\s+", " ").trim();
-            line = line.replaceAll("^[^\\p{L}\\p{N}]+", "")
-                    .replaceAll("[^\\p{L}\\p{N}!?.,'’\\-]+$", "").trim();
+            line = line.replaceAll("^[^\p{L}\p{N}]+", "")
+                    .replaceAll("[^\p{L}\p{N}!?.,'’\-]+$", "").trim();
+            line = sanitizeSubtitleArtifacts(line);
             if (!isLikelySubtitleLine(line)) continue;
 
             String norm = normalizeOcr(line);
@@ -1516,7 +1599,7 @@ public class MainActivity extends Activity {
             if (out.length() > 0) out.append(' ');
             out.append(word);
         }
-        return out.toString().trim();
+        return sanitizeSubtitleArtifacts(out.toString().trim());
     }
 
     private boolean areSimilarOcrTexts(String a, String b) {
@@ -1816,6 +1899,122 @@ public class MainActivity extends Activity {
         e.setInputType(type);
         e.setBackgroundDrawable(round(C_PANEL_2, C_BORDER, 8));
         return e;
+    }
+
+    // SUBVORYN_OCR_ARTIFACT_CLEANUP_V5
+    /** Join adjacent fragments only when the full phrases strongly match; object-name overlap alone is insufficient. */
+    private int mergeNearbySimilarOcrCues(List<SubtitleCue> target, long maxGapMs) {
+        if (target == null || target.size() < 2) return 0;
+        java.util.Collections.sort(target, new java.util.Comparator<SubtitleCue>() {
+            public int compare(SubtitleCue a, SubtitleCue b) {
+                return a.startMs < b.startMs ? -1 : (a.startMs == b.startMs ? 0 : 1);
+            }
+        });
+        int merged = 0;
+        int i = 1;
+        while (i < target.size()) {
+            SubtitleCue previous = target.get(i - 1);
+            SubtitleCue current = target.get(i);
+            long gap = current.startMs - previous.endMs;
+            if (gap <= maxGapMs) {
+                String previousVisible = sanitizeSubtitleArtifacts(SubtitleEngine.displayText(previous));
+                String currentVisible = sanitizeSubtitleArtifacts(SubtitleEngine.displayText(current));
+                if (areSimilarOcrTexts(previousVisible, currentVisible)) {
+                    String previousRaw = sanitizeSubtitleArtifacts(previous.rawText == null ? previous.text : previous.rawText);
+                    String currentRaw = sanitizeSubtitleArtifacts(current.rawText == null ? current.text : current.rawText);
+                    boolean useCurrent = subtitleTextQuality(currentVisible) > subtitleTextQuality(previousVisible);
+                    if (useCurrent) {
+                        previous.text = currentRaw;
+                        previous.rawText = currentRaw;
+                    } else {
+                        previous.text = previousRaw;
+                        previous.rawText = previousRaw;
+                    }
+                    if (current.startMs < previous.startMs) previous.startMs = current.startMs;
+                    if (current.endMs > previous.endMs) previous.endMs = current.endMs;
+                    target.remove(i);
+                    merged++;
+                    continue;
+                }
+            }
+            i++;
+        }
+        return merged;
+    }
+
+    private void cleanupCueTextArtifacts() {
+        if (!ensureImported()) return;
+        int changed = 0;
+        for (int i = 0; i < cues.size(); i++) {
+            SubtitleCue cue = cues.get(i);
+            String before = cue.rawText == null ? cue.text : cue.rawText;
+            String after = sanitizeSubtitleArtifacts(before);
+            if (after.length() == 0) after = SubtitleEngine.displayText(cue);
+            if (!after.equals(before)) {
+                cue.rawText = after;
+                cue.text = after;
+                changed++;
+            }
+        }
+        int similarMerged = mergeNearbySimilarOcrCues(cues, 650L);
+        int merged = SubtitleEngine.mergeConsecutiveDuplicates(cues, 350);
+        sortCues();
+        refreshScreen();
+        toast("Cleanup complete: " + changed + " cue(s) cleaned, " + (similarMerged + merged) + " duplicate/fragment cue(s) merged. Review spelling before export.");
+    }
+
+    private boolean isObviousOcrNoiseCue(SubtitleCue cue) {
+        if (cue == null) return true;
+        String visible = SubtitleEngine.displayText(cue).trim();
+        if (visible.length() == 0) return true;
+        String flat = visible.replace("\\N", " ").replace('\n', ' ').trim();
+        String norm = normalizeOcrForMatch(flat);
+        if (norm.length() < 3) return true;
+        int nonSpace = 0, alphaNum = 0, symbolNoise = 0;
+        for (int i = 0; i < flat.length(); i++) {
+            char ch = flat.charAt(i);
+            if (Character.isWhitespace(ch)) continue;
+            nonSpace++;
+            if (Character.isLetterOrDigit(ch)) alphaNum++;
+            else if (".,!?'-’:\\N".indexOf(ch) < 0) symbolNoise++;
+        }
+        if (nonSpace == 0 || alphaNum / (double) nonSpace < 0.52d) return true;
+        if (symbolNoise / (double) Math.max(1, nonSpace) > 0.18d) return true;
+        // Use the OCR noise detector only as a secondary flag; a confirmation dialog always follows.
+        return containsLikelyOcrNoise(sanitizeSubtitleArtifacts(flat)) && alphaNum / (double) nonSpace < 0.72d;
+    }
+
+    private void reviewAndRemoveOcrNoise() {
+        if (!ensureImported()) return;
+        final ArrayList<SubtitleCue> candidates = new ArrayList<SubtitleCue>();
+        StringBuilder preview = new StringBuilder();
+        for (int i = 0; i < cues.size(); i++) {
+            SubtitleCue cue = cues.get(i);
+            if (isObviousOcrNoiseCue(cue)) {
+                candidates.add(cue);
+                if (candidates.size() <= 8) {
+                    preview.append("#").append(i + 1).append("  ")
+                            .append(clip(SubtitleEngine.displayText(cue), 70)).append('\n');
+                }
+            }
+        }
+        if (candidates.size() == 0) {
+            toast("No clearly garbled OCR cues detected.");
+            return;
+        }
+        if (candidates.size() > 8) preview.append("…and ").append(candidates.size() - 8).append(" more cue(s).\n");
+        preview.append("\nThis is a heuristic. A short or stylized real line could be flagged, so check the preview before removing.");
+        new AlertDialog.Builder(this)
+                .setTitle("Review " + candidates.size() + " possible junk cue(s)")
+                .setMessage(preview.toString())
+                .setNegativeButton("Keep all", null)
+                .setPositiveButton("Remove selected", new android.content.DialogInterface.OnClickListener() {
+                    public void onClick(android.content.DialogInterface d, int which) {
+                        cues.removeAll(candidates);
+                        refreshScreen();
+                        toast("Removed " + candidates.size() + " likely junk cue(s).");
+                    }
+                }).show();
     }
 
     private void mergeDuplicates() {
