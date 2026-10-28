@@ -7,6 +7,7 @@ import android.content.ClipboardManager;
 import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.graphics.Color;
 import android.graphics.Typeface;
@@ -57,6 +58,8 @@ import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 /** SUBVORYN_ENCODING_V1: SAF-backed hardsub encoding with a bundled, runtime-verified FFmpeg engine. */
 public class EncodingActivity extends Activity {
@@ -77,6 +80,7 @@ public class EncodingActivity extends Activity {
 
     private static final int REQ_VIDEO = 5101;
     private static final int REQ_SUBTITLE = 5102;
+    private static final int REQ_STYLE_EDITOR = 5105;
     private static final int REQ_FONTS = 5103;
     private static final int REQ_OUTPUT_FOLDER = 5104;
     private static final int C_BG = Color.rgb(22, 24, 36);
@@ -123,6 +127,9 @@ public class EncodingActivity extends Activity {
     private ProgressBar encodeProgress;
     private LinearLayout progressCard;
     private Button startButton, cancelButton, openOutputButton, shareOutputButton;
+    private Button editStyleButton;
+    private File appliedStyledSubtitle;
+    private String appliedStyleSourceUri = "";
 
     @Override public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -178,6 +185,10 @@ public class EncodingActivity extends Activity {
         Button subtitleButton = button("Import Subtitle File", true);
         subtitleButton.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { pickDocument(REQ_SUBTITLE); } });
         inputCard.addView(subtitleButton, fullWidth());
+        editStyleButton = button("Edit Subtitle Style", false);
+        editStyleButton.setEnabled(false);
+        editStyleButton.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { openSubtitleStyleEditor(); } });
+        inputCard.addView(editStyleButton, margin(-1, 7, 0, 0));
         content.addView(inputCard, margin(-1, -2, 0, 11));
 
         LinearLayout fontCard = card();
@@ -396,7 +407,8 @@ public class EncodingActivity extends Activity {
 
     private void updateSelectionLabels() {
         videoLabel.setText(videoUri == null ? "No video selected" : videoName + "  ·  " + formatBytes(videoSize));
-        subtitleLabel.setText(subtitleUri == null ? "No subtitle file selected" : subtitleName + "  ·  " + formatBytes(subtitleSize));
+        subtitleLabel.setText(subtitleUri == null ? "No subtitle file selected" : subtitleName + "  ·  " + formatBytes(subtitleSize) + (isStyledSubtitleForCurrentSource() ? "  ·  Style applied" : ""));
+        if (editStyleButton != null) { editStyleButton.setEnabled(subtitleUri != null && !encoding); editStyleButton.setText(isStyledSubtitleForCurrentSource() ? "Edit Subtitle Style · Applied" : "Edit Subtitle Style"); }
         if (fontsTreeUri == null) fontLabel.setText("No custom font folder selected. System fonts will be used.");
         if (outputTreeUri == null) outputFolderLabel.setText("Download/SubVoryn/Encoded/");
         refreshProposedFilename();
@@ -407,6 +419,16 @@ public class EncodingActivity extends Activity {
             else if (!inputsReady) startHint.setText("Select both a video and subtitle file to enable encoding.");
             else startHint.setText("Ready to encode. Tap Start Encoding; the screen will scroll to live progress.");
         }
+    }
+
+    private void openSubtitleStyleEditor() {
+        if (subtitleUri == null) { toast("Import a subtitle file first."); return; }
+        Intent intent = new Intent(this, SubtitleStyleEditorActivity.class);
+        intent.putExtra(SubtitleStyleEditorActivity.EXTRA_URI, subtitleUri.toString());
+        intent.putExtra(SubtitleStyleEditorActivity.EXTRA_NAME, subtitleName);
+        intent.putExtra(SubtitleStyleEditorActivity.EXTRA_FONTS_URI, fontsTreeUri == null ? "" : fontsTreeUri.toString());
+        try { startActivityForResult(intent, REQ_STYLE_EDITOR); }
+        catch (Exception e) { toast("Subtitle Style Editor could not be opened: " + safeMessage(e)); }
     }
 
     private void pickDocument(int requestCode) {
@@ -434,6 +456,19 @@ public class EncodingActivity extends Activity {
 
     @Override protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQ_STYLE_EDITOR) {
+            if (resultCode == RESULT_OK && data != null) {
+                String path = data.getStringExtra(SubtitleStyleEditorActivity.EXTRA_STYLED_PATH);
+                String source = data.getStringExtra(SubtitleStyleEditorActivity.EXTRA_SOURCE_URI);
+                File candidate = path == null ? null : new File(path);
+                if (subtitleUri != null && source != null && source.equals(subtitleUri.toString()) && candidate != null && candidate.isFile() && candidate.length() > 0L) {
+                    appliedStyledSubtitle = candidate; appliedStyleSourceUri = source;
+                    updateSelectionLabels(); refreshSummaryAndPreview();
+                    toast("Subtitle style applied to the current encoding workflow.");
+                } else toast("Style result did not match the currently selected subtitle, or the working file is missing.");
+            }
+            return;
+        }
         if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
         Uri uri = data.getData();
         int flags = data.getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
@@ -455,6 +490,8 @@ public class EncodingActivity extends Activity {
             subtitleUri = uri;
             subtitleName = name;
             subtitleSize = querySize(uri);
+            appliedStyledSubtitle = null; appliedStyleSourceUri = "";
+            if (editStyleButton != null) editStyleButton.setText("Edit Subtitle Style");
             prefs.edit().putString(KEY_SUBTITLE_URI, uri.toString()).apply();
             updateSelectionLabels();
             toast("Subtitle file selected.");
@@ -547,6 +584,8 @@ public class EncodingActivity extends Activity {
         final int preset = presetSpinner.getSelectedItemPosition();
         final int audio = audioSpinner.getSelectedItemPosition();
         final int encoderMode = encoderModeSpinner.getSelectedItemPosition();
+        final String selectedStyledPath = appliedStyledSubtitle != null && appliedStyledSubtitle.isFile() && subtitleUri != null && appliedStyleSourceUri.equals(subtitleUri.toString()) ? appliedStyledSubtitle.getAbsolutePath() : "";
+        final boolean selectedVttStyleApplied = selectedStyledPath.length() > 0 && "vtt".equals(extensionOf(subtitleName));
         prefs.edit().putInt(KEY_ENCODER_MODE, encoderMode).apply();
 
         encoding = true;
@@ -579,7 +618,7 @@ public class EncodingActivity extends Activity {
             public void run() {
                 try {
                     runEncodingWorker(selectedVideo, selectedSubtitle, selectedFonts, selectedOutputFolder,
-                            outName, resolution, fps, customFps, quality, preset, audio, encoderMode);
+                            outName, resolution, fps, customFps, quality, preset, audio, encoderMode, selectedStyledPath, selectedVttStyleApplied);
                 } catch (final Throwable e) {
                     final String error = safeMessage(e);
                     deleteQuietly(activeTempOutput);
@@ -597,7 +636,7 @@ public class EncodingActivity extends Activity {
 
     private void runEncodingWorker(Uri selectedVideo, Uri selectedSubtitle, Uri selectedFonts,
             Uri selectedOutputFolder, String outputName, int resolution, int fpsIndex,
-            String customFps, int quality, int presetIndex, int audioIndex, int encoderMode) throws Exception {
+            String customFps, int quality, int presetIndex, int audioIndex, int encoderMode, String styledSubtitlePath, boolean vttStyleApplied) throws Exception {
         File parent = getExternalFilesDir(Environment.DIRECTORY_MOVIES);
         if (parent == null) parent = getCacheDir();
         File workRoot = new File(parent, "SubVorynWork");
@@ -635,7 +674,11 @@ public class EncodingActivity extends Activity {
         if (cancelRequested) throw new IOException("Cancelled during preparation.");
         postProgress("Copying subtitle file…", "Selected subtitles will be burned once into the video.", true);
         File subtitleSource = new File(workDir, "subtitles_source." + extensionOf(subtitleName));
-        copyUriToFile(selectedSubtitle, subtitleSource);
+        if (styledSubtitlePath != null && styledSubtitlePath.trim().length() > 0) {
+            File styledFile = new File(styledSubtitlePath);
+            if (!styledFile.isFile() || styledFile.length() == 0L) throw new IOException("The applied styled subtitle working file is missing. Reopen Edit Subtitle Style and apply the changes again.");
+            copyLocalFile(styledFile, subtitleSource);
+        } else copyUriToFile(selectedSubtitle, subtitleSource);
         if (cancelRequested) throw new IOException("Cancelled during preparation.");
         if (!input.isFile() || input.length() == 0L) throw new IOException("The copied input video is empty or inaccessible.");
         if (!subtitleSource.isFile() || subtitleSource.length() == 0L) throw new IOException("The copied subtitle file is empty or inaccessible.");
@@ -673,7 +716,7 @@ public class EncodingActivity extends Activity {
         final File sessionWorkDir = workDir;
         final long expectedDuration = durationMs;
         final String engineEncoder = selectedEncoder;
-        final String filter = makeFilter(subtitle, fontsDir, copiedFonts, resolution);
+        final String filter = makeFilter(subtitle, fontsDir, copiedFonts, resolution, vttStyleApplied);
         final String fpsValue = fpsValueFor(fpsIndex, customFps);
         final long wallStart = System.currentTimeMillis();
         encodingStartWallMs = wallStart;
@@ -830,13 +873,18 @@ public class EncodingActivity extends Activity {
         return renderFile;
     }
 
-    private String makeFilter(File subtitle, File fontsDir, int copiedFonts, int resolution) throws IOException {
+    private String makeFilter(File subtitle, File fontsDir, int copiedFonts, int resolution, boolean vttStyleApplied) throws IOException {
         if (subtitle == null || !subtitle.isFile()) throw new IOException("Subtitle file was not staged correctly.");
         String ext = extensionOf(subtitle.getName());
         boolean ass = "ass".equals(ext) || "ssa".equals(ext);
         String subPath = escapeFilterPath(subtitle.getAbsolutePath());
         String filter = "subtitles=filename='" + subPath + "'";
         if (ass && copiedFonts > 0 && fontsDir.isDirectory()) filter += ":fontsdir='" + escapeFilterPath(fontsDir.getAbsolutePath()) + "'";
+        // Only edited VTT input gets WebVTT-style renderer overrides. ASS/SSA always keep native styles and never get force_style.
+        if (vttStyleApplied) {
+            String forceStyle = currentVttForceStyle();
+            if (forceStyle.length() > 0) filter += ":force_style='" + escapeFilterForceStyle(forceStyle) + "'";
+        }
         int height = resolutionHeight(resolution);
         if (height > 0) {
             // A selected 480p/720p/1080p/1440p target means that exact output height, with aspect ratio intact.
@@ -1131,6 +1179,7 @@ public class EncodingActivity extends Activity {
         String sub = subtitleName.length() == 0 ? "<selected-subtitle>" : subtitleName;
         String filter = "subtitles='" + escapePreviewFilter(sub) + "'";
         String ext = extensionOf(subtitleName);
+        if ("vtt".equals(ext) && isStyledSubtitleForCurrentSource()) { String forceStyle = currentVttForceStyle(); if (forceStyle.length() > 0) filter += ":force_style='" + escapeFilterForceStyle(forceStyle) + "'"; }
         if (("ass".equals(ext) || "ssa".equals(ext)) && fontsTreeUri != null && fontCount > 0) filter += ":fontsdir='<selected-font-folder>'";
         int height = resolutionHeight(resolutionSpinner == null ? 0 : resolutionSpinner.getSelectedItemPosition());
         if (height > 0) filter += ",scale=-2:" + height;
@@ -1219,6 +1268,7 @@ public class EncodingActivity extends Activity {
         StringBuilder b = new StringBuilder();
         b.append("Input: ").append(videoUri == null ? "missing video" : videoName + " (" + formatBytes(videoSize) + ")").append('\n');
         b.append("Subtitles: ").append(subtitleUri == null ? "missing subtitle file" : subtitleName + " (" + formatBytes(subtitleSize) + ")").append('\n');
+        b.append("Subtitle style: ").append(isStyledSubtitleForCurrentSource() ? "edited style will be used" : "source styling/default renderer styling").append('\n');
         b.append("Mode: hardcoded subtitles — permanently rendered into video\n");
         b.append("Resolution: ").append(RESOLUTIONS[resolutionSpinner.getSelectedItemPosition()]).append(" · FPS: ")
                 .append(fpsValueFor(fpsSpinner.getSelectedItemPosition(), customFpsInput.getText().toString().trim()).length() == 0 ? "Original" : fpsValueFor(fpsSpinner.getSelectedItemPosition(), customFpsInput.getText().toString().trim())).append('\n');
@@ -1308,6 +1358,33 @@ public class EncodingActivity extends Activity {
         }
         nav.setPadding(dp(7), dp(6), dp(7), dp(6));
         return nav;
+    }
+
+    private boolean isStyledSubtitleForCurrentSource() {
+        if (appliedStyledSubtitle == null || !appliedStyledSubtitle.isFile() || subtitleUri == null || !appliedStyleSourceUri.equals(subtitleUri.toString())) return false;
+        SharedPreferences stylePrefs = getSharedPreferences(SubtitleStyleEditorActivity.PREFS, MODE_PRIVATE);
+        return subtitleUri.toString().equals(stylePrefs.getString("last_source_uri", ""));
+    }
+
+    private String currentVttForceStyle() {
+        SharedPreferences p = getSharedPreferences(SubtitleStyleEditorActivity.PREFS, MODE_PRIVATE);
+        if (subtitleUri == null || !subtitleUri.toString().equals(p.getString("last_source_uri", ""))) return "";
+        Map<String, String> m = new LinkedHashMap<String, String>();
+        String[] fields = {"Fontname","Fontsize","PrimaryColour","SecondaryColour","OutlineColour","BackColour","Bold","Italic","Underline","StrikeOut","Spacing","BorderStyle","Outline","Shadow","Alignment","MarginL","MarginR","MarginV"};
+        for (String field : fields) m.put(field, p.getString("last_" + field, ""));
+        return SubtitleStyleEngine.buildVttForceStyle(m);
+    }
+
+    private String escapeFilterForceStyle(String value) {
+        return value == null ? "" : value.replace("\\", "\\\\").replace("'", "\\'").replace(":", "\\:");
+    }
+
+    private void copyLocalFile(File source, File destination) throws IOException {
+        if (source == null || !source.isFile() || source.length() == 0L) throw new IOException("Styled subtitle file is missing or empty.");
+        InputStream in = new FileInputStream(source); OutputStream out = new FileOutputStream(destination, false);
+        try { byte[] buffer = new byte[8192]; int n; while ((n = in.read(buffer)) != -1) out.write(buffer, 0, n); out.flush(); }
+        finally { try { in.close(); } catch (Exception ignored) { } try { out.close(); } catch (Exception ignored) { } }
+        if (!destination.isFile() || destination.length() == 0L) throw new IOException("Styled subtitle could not be copied into the FFmpeg workspace.");
     }
 
     private void copyUriToFile(Uri uri, File destination) throws Exception {
