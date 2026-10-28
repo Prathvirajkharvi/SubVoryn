@@ -194,7 +194,9 @@ public class EncodingActivity extends Activity {
         editStyleButton.setBackgroundDrawable(round(C_PANEL_2, C_ACCENT, 12));
         editStyleButton.setContentDescription("Edit Subtitle Style. Import an ASS, SSA, or VTT file in Encoding to enable this action.");
         editStyleButton.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { openSubtitleStyleEditor(); } });
-        inputCard.addView(editStyleButton, margin(-1, 7, 0, 0));
+        LinearLayout.LayoutParams styleButtonParams = new LinearLayout.LayoutParams(-1, dp(48));
+        styleButtonParams.topMargin = dp(7);
+        inputCard.addView(editStyleButton, styleButtonParams);
         editStyleHint = text("Import an ASS, SSA, or VTT file in Encoding to edit its style. A subtitle loaded on Home is separate and is not selected here.", 11, C_MUTED, false);
         editStyleHint.setGravity(Gravity.TOP | Gravity.LEFT);
         editStyleHint.setPadding(dp(4), dp(7), dp(4), dp(2));
