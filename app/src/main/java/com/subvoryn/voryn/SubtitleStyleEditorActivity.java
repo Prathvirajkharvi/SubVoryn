@@ -412,7 +412,7 @@ public class SubtitleStyleEditorActivity extends Activity {
     private void scanFontsRecursive(Uri tree,String docId,int depth,int[] visited,List<String> out) throws Exception {
         if(depth>7||visited[0]>700)return;Uri children=DocumentsContract.buildChildDocumentsUriUsingTree(tree,docId);Cursor c=null;
         try{c=getContentResolver().query(children,new String[]{DocumentsContract.Document.COLUMN_DOCUMENT_ID,DocumentsContract.Document.COLUMN_DISPLAY_NAME,DocumentsContract.Document.COLUMN_MIME_TYPE},null,null,null);if(c==null)return;
-            while(c.moveToNext()&&visited[0]++<700){String id=c.getString(0),name=c.getString(1),mime=c.getString(2);if(DocumentsContract.Document.MIME_TYPE_DIR.equals(mime))scanFontsRecursive(tree,id,depth+1,visited,out);else if(name!=null&&(name.toLowerCase(Locale.ROOT).endsWith(".ttf")||name.toLowerCase(Locale.ROOT).endsWith(".otf"))&&!out.contains(name.substring(0,name.lastIndexOf('.'))))out.add(name.substring(0,name.lastIndexOf('.'));}
+            while(c.moveToNext()&&visited[0]++<700){String id=c.getString(0),name=c.getString(1),mime=c.getString(2);if(DocumentsContract.Document.MIME_TYPE_DIR.equals(mime))scanFontsRecursive(tree,id,depth+1,visited,out);else if(name!=null&&(name.toLowerCase(Locale.ROOT).endsWith(".ttf")||name.toLowerCase(Locale.ROOT).endsWith(".otf"))&&!out.contains(name.substring(0,name.lastIndexOf('.'))))out.add(name.substring(0,name.lastIndexOf('.')));}
         }finally{if(c!=null)c.close();}
     }
 
