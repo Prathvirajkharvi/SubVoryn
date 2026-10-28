@@ -85,6 +85,44 @@ public class SubtitleStyleEngineTest {
         assertTrue(SubtitleStyleEngine.hasInlineAppearanceOverrides("Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,{\\an8\\bord4\\pos(20,30)}Hello"));
     }
 
+    // SUBVORYN_STYLE_FIX_V1: targeted regression tests
+    @Test public void styleEditorActionRequiresSupportedInputAndIdleEncoding() {
+        assertFalse(SubtitleStyleEngine.canEditStyleButton(false, "episode.ass", false));
+        assertFalse(SubtitleStyleEngine.canEditStyleButton(true, "episode.srt", false));
+        assertFalse(SubtitleStyleEngine.canEditStyleButton(true, "episode.vtt", true));
+        assertTrue(SubtitleStyleEngine.canEditStyleButton(true, "episode.ass", false));
+        assertTrue(SubtitleStyleEngine.canEditStyleButton(true, "episode.ssa", false));
+        assertTrue(SubtitleStyleEngine.canEditStyleButton(true, "episode.vtt", false));
+    }
+
+    @Test public void vttCssCombinesUnderlineAndStrikeOut() {
+        Map<String,String> style = SubtitleStyleEngine.defaultStyle();
+        style.put("Underline", "-1"); style.put("StrikeOut", "-1");
+        String input = "WEBVTT\n\ncue-1\n00:00:00.000 --> 00:00:01.000 line:90%\nKeep me\n\nNOTE preserve this\n";
+        String output = SubtitleStyleEngine.editVttStyle(input, style);
+        assertTrue(output.contains("text-decoration: underline line-through"));
+        assertTrue(output.contains("cue-1\n00:00:00.000 --> 00:00:01.000 line:90%"));
+        assertTrue(output.contains("NOTE preserve this"));
+    }
+
+    @Test public void assColorRoundTripKeepsRgbChannelsAndFullyTransparentAlpha() {
+        int transparentColor = 0x00010203;
+        assertEquals("&HFF030201", SubtitleStyleEngine.argbToAssColor(transparentColor));
+        assertEquals(transparentColor, SubtitleStyleEngine.assColorToArgb("&HFF030201"));
+        assertEquals(0xFF010203, SubtitleStyleEngine.assColorToArgb("&H00030201"));
+    }
+
+    @Test public void assStyleRejectsIntegerOverflowInsteadOfWrappingMargins() {
+        Map<String,String> changes = new LinkedHashMap<String,String>();
+        changes.put("MarginL", "4294967296");
+        try {
+            SubtitleStyleEngine.editAssStyle(ASS, "Main", changes);
+            fail("Overflowing margin must be rejected");
+        } catch (IllegalArgumentException expected) {
+            assertTrue(expected.getMessage().contains("range") || expected.getMessage().contains("integer"));
+        }
+    }
+
     @Test public void formatDetectionHonorsExtensionAndVttHeader() {
         assertEquals(SubtitleStyleEngine.SSA,SubtitleStyleEngine.detectFormat("captions.ssa","not parsed"));
         assertEquals(SubtitleStyleEngine.VTT,SubtitleStyleEngine.detectFormat("data.txt","WEBVTT\n\n"));

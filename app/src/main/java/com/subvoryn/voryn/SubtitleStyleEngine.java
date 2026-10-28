@@ -32,6 +32,18 @@ public final class SubtitleStyleEngine {
         return "";
     }
 
+    // SUBVORYN_STYLE_FIX_V1: format-aware editor action gate
+    /** True only for formats with a native style editor; SRT remains valid for encoding. */
+    public static boolean isStyleEditorSupported(String fileName) {
+        String format = detectFormat(fileName, "");
+        return ASS.equals(format) || SSA.equals(format) || VTT.equals(format);
+    }
+
+    /** Shared, testable gate for the visible Edit Subtitle Style action. */
+    public static boolean canEditStyleButton(boolean hasSubtitle, String fileName, boolean encoding) {
+        return hasSubtitle && !encoding && isStyleEditorSupported(fileName);
+    }
+
     public static List<String> styleNames(String content) {
         if (content == null) return Collections.emptyList();
         List<String> result = new ArrayList<String>();
@@ -147,17 +159,21 @@ public final class SubtitleStyleEngine {
             if ("0".equals(v) || "false".equalsIgnoreCase(v)) return "0";
             throw new IllegalArgumentException("Invalid toggle value for " + name + ".");
         }
+        // SUBVORYN_STYLE_FIX_V1: overflow-safe numeric validation
         if (Arrays.asList("borderstyle", "alignment", "marginl", "marginr", "marginv", "encoding").contains(n)) {
-            int i; try { i = (int) Long.parseLong(v); } catch (Exception e) { throw new IllegalArgumentException("Invalid integer for " + name + "."); }
+            long parsed; try { parsed = Long.parseLong(v); } catch (Exception e) { throw new IllegalArgumentException("Invalid integer for " + name + "."); }
+            if (parsed < 0L || parsed > 100000L) throw new IllegalArgumentException(name + " is out of range.");
+            int i = (int) parsed;
             if ("borderstyle".equals(n) && i != 1 && i != 3) throw new IllegalArgumentException("BorderStyle must be 1 or 3.");
             if ("alignment".equals(n) && (i < 1 || i > 9)) throw new IllegalArgumentException("Alignment must be 1–9.");
-            if (i < 0 || i > 100000) throw new IllegalArgumentException(name + " is out of range.");
             return String.valueOf(i);
         }
         if (n.endsWith("colour")) {
             if (!v.matches("(?i)&H[0-9A-F]{6,8}|[0-9A-F]{6,8}")) throw new IllegalArgumentException("Invalid ASS colour for " + name + ".");
             return v.startsWith("&H") || v.startsWith("&h") ? "&H" + v.substring(2).toUpperCase(Locale.ROOT) : "&H" + v.toUpperCase(Locale.ROOT);
         }
+        if ("fontname".equals(n) && (v.indexOf(',') >= 0 || v.indexOf('\r') >= 0 || v.indexOf('\n') >= 0))
+            throw new IllegalArgumentException("Font family cannot contain commas or line breaks in ASS/SSA style records.");
         return v;
     }
 
@@ -225,7 +241,14 @@ public final class SubtitleStyleEngine {
         if (shadows.length() > 0) css.append("; text-shadow: ").append(shadows);
         if (truth(value(s, "Bold", "0"))) css.append("; font-weight: bold");
         if (truth(value(s, "Italic", "0"))) css.append("; font-style: italic");
-        if (truth(value(s, "Underline", "0"))) css.append("; text-decoration: underline");
+        // SUBVORYN_STYLE_FIX_V1: VTT strike-through mapping
+        StringBuilder decorations = new StringBuilder();
+        if (truth(value(s, "Underline", "0"))) decorations.append("underline");
+        if (truth(value(s, "StrikeOut", "0"))) {
+            if (decorations.length() > 0) decorations.append(' ');
+            decorations.append("line-through");
+        }
+        if (decorations.length() > 0) css.append("; text-decoration: ").append(decorations);
         return css.toString();
     }
 

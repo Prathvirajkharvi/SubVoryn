@@ -386,6 +386,39 @@ public class SubtitleStyleEditorActivity extends Activity {
         if(preview==null || !loaded)return;
         try {Map<String,String> m=collectValues(); preview.setStyle(String.valueOf(fontSpinner.getSelectedItem()),(float)number(sizeEdit,42,8,200),primaryArgb,outlineArgb,backArgb,(float)number(outlineEdit,2,0,20),(float)number(shadowEdit,1,0,20),boldBox.isChecked(),italicBox.isChecked(),underlineBox.isChecked(),strikeBox.isChecked(),(float)number(spacingEdit,0,0,40),alignmentSpinner==null?2:alignmentSpinner.getSelectedItemPosition()+1);}
         catch(Exception ignored){}
+        refreshFontFamilyWarning();
+    }
+
+    // SUBVORYN_STYLE_FIX_V1: font family vs font-file name warning
+    /** File basenames are only a hint; Android/SAF does not make them authoritative embedded family metadata. */
+    private void refreshFontFamilyWarning() {
+        if (fontFolderStatus == null) return;
+        String selected = fontSpinner == null || fontSpinner.getSelectedItem() == null
+                ? "" : String.valueOf(fontSpinner.getSelectedItem()).trim();
+        if (fontsTreeUri == null) {
+            fontFolderStatus.setText("No custom font folder selected; system fonts will be used where available.");
+            fontFolderStatus.setTextColor(MUTED);
+            return;
+        }
+        if (fontNames == null || fontNames.isEmpty()) {
+            fontFolderStatus.setText("Warning: no accessible .ttf/.otf files were found in " + treeFolderName(fontsTreeUri)
+                    + ". Check SAF folder access; the renderer may use a system fallback.");
+            fontFolderStatus.setTextColor(Color.rgb(238, 174, 111));
+            return;
+        }
+        boolean matchedFileName = false;
+        for (String name : fontNames) {
+            if (name != null && name.equalsIgnoreCase(selected)) { matchedFileName = true; break; }
+        }
+        if (matchedFileName) {
+            fontFolderStatus.setText("Font folder " + treeFolderName(fontsTreeUri) + " · " + fontNames.size()
+                    + " font file(s). A filename matches “" + selected + "”; filename is not proof of embedded family metadata.");
+            fontFolderStatus.setTextColor(ACCENT);
+        } else {
+            fontFolderStatus.setText("Warning: no filename matches font family “" + selected + "” in "
+                    + treeFolderName(fontsTreeUri) + " (" + fontNames.size() + " font file(s)). The embedded family may differ; FFmpeg/libass may fall back.");
+            fontFolderStatus.setTextColor(Color.rgb(238, 174, 111));
+        }
     }
 
     private void openColorDialog(String key,String title) {

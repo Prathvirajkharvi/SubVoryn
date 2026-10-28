@@ -128,6 +128,7 @@ public class EncodingActivity extends Activity {
     private LinearLayout progressCard;
     private Button startButton, cancelButton, openOutputButton, shareOutputButton;
     private Button editStyleButton;
+    private TextView editStyleHint;
     private File appliedStyledSubtitle;
     private String appliedStyleSourceUri = "";
 
@@ -180,15 +181,25 @@ public class EncodingActivity extends Activity {
         Button videoButton = button("Import Video", true);
         videoButton.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { pickDocument(REQ_VIDEO); } });
         inputCard.addView(videoButton, fullWidth());
-        subtitleLabel = text("No subtitle file selected", 13, C_MUTED, false);
+        subtitleLabel = text("No subtitle file selected in Encoding", 13, C_MUTED, false);
         inputCard.addView(subtitleLabel, margin(-1, 11, 0, 5));
         Button subtitleButton = button("Import Subtitle File", true);
         subtitleButton.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { pickDocument(REQ_SUBTITLE); } });
         inputCard.addView(subtitleButton, fullWidth());
+        // SUBVORYN_STYLE_FIX_V1: visible disabled editor action
         editStyleButton = button("Edit Subtitle Style", false);
         editStyleButton.setEnabled(false);
+        editStyleButton.setAlpha(1.0f);
+        editStyleButton.setTextColor(C_MUTED);
+        editStyleButton.setBackgroundDrawable(round(C_PANEL_2, C_ACCENT, 12));
+        editStyleButton.setContentDescription("Edit Subtitle Style. Import an ASS, SSA, or VTT file in Encoding to enable this action.");
         editStyleButton.setOnClickListener(new View.OnClickListener() { public void onClick(View v) { openSubtitleStyleEditor(); } });
         inputCard.addView(editStyleButton, margin(-1, 7, 0, 0));
+        editStyleHint = text("Import an ASS, SSA, or VTT file in Encoding to edit its style. A subtitle loaded on Home is separate and is not selected here.", 11, C_MUTED, false);
+        editStyleHint.setGravity(Gravity.TOP | Gravity.LEFT);
+        editStyleHint.setPadding(dp(4), dp(7), dp(4), dp(2));
+        editStyleHint.setVisibility(View.VISIBLE);
+        inputCard.addView(editStyleHint, margin(-1, -2, 0, 0));
         content.addView(inputCard, margin(-1, -2, 0, 11));
 
         LinearLayout fontCard = card();
@@ -407,8 +418,32 @@ public class EncodingActivity extends Activity {
 
     private void updateSelectionLabels() {
         videoLabel.setText(videoUri == null ? "No video selected" : videoName + "  ·  " + formatBytes(videoSize));
-        subtitleLabel.setText(subtitleUri == null ? "No subtitle file selected" : subtitleName + "  ·  " + formatBytes(subtitleSize) + (isStyledSubtitleForCurrentSource() ? "  ·  Style applied" : ""));
-        if (editStyleButton != null) { editStyleButton.setEnabled(subtitleUri != null && !encoding); editStyleButton.setText(isStyledSubtitleForCurrentSource() ? "Edit Subtitle Style · Applied" : "Edit Subtitle Style"); }
+        // SUBVORYN_STYLE_FIX_V1: explicit editor state explanation
+        String styleFormat = SubtitleStyleEngine.detectFormat(subtitleName, "");
+        boolean styleFormatSupported = subtitleUri != null && SubtitleStyleEngine.isStyleEditorSupported(subtitleName);
+        String shownFormat = styleFormat.length() > 0 ? styleFormat.toUpperCase(Locale.ROOT) : extensionOf(subtitleName).toUpperCase(Locale.ROOT);
+        subtitleLabel.setText(subtitleUri == null ? "No subtitle file selected in Encoding" : subtitleName + "  ·  " + (shownFormat.length() == 0 ? "SUBTITLE" : shownFormat) + "  ·  " + formatBytes(subtitleSize) + (isStyledSubtitleForCurrentSource() ? "  ·  Style applied" : ""));
+        if (editStyleButton != null) {
+            editStyleButton.setVisibility(View.VISIBLE);
+            editStyleButton.setEnabled(SubtitleStyleEngine.canEditStyleButton(subtitleUri != null, subtitleName, encoding));
+            editStyleButton.setAlpha(1.0f);
+            editStyleButton.setTextColor(styleFormatSupported && !encoding ? C_TEXT : C_MUTED);
+            editStyleButton.setBackgroundDrawable(round(C_PANEL_2, C_ACCENT, 12));
+            editStyleButton.setText(isStyledSubtitleForCurrentSource() ? "Edit Subtitle Style · Applied" : "Edit Subtitle Style");
+            editStyleButton.setContentDescription(styleFormatSupported && !encoding
+                    ? "Edit subtitle style for " + subtitleName
+                    : "Edit Subtitle Style disabled. Import an ASS, SSA, or VTT file in Encoding.");
+        }
+        if (editStyleHint != null) {
+            String hint;
+            if (encoding) hint = "Encoding is running; style editing is temporarily disabled.";
+            else if (subtitleUri == null) hint = "Import an ASS, SSA, or VTT file in Encoding to edit its style. A subtitle loaded on Home is separate and is not selected here.";
+            else if (!styleFormatSupported) hint = "Style Editor supports ASS, SSA, and VTT. The selected file is " + (shownFormat.length() == 0 ? "an unknown format" : shownFormat) + "; choose a supported subtitle format.";
+            else hint = "Selected in Encoding: " + subtitleName + " (" + shownFormat + "). Changes use a working copy; the imported original stays unchanged.";
+            editStyleHint.setText(hint);
+            editStyleHint.setTextColor(subtitleUri != null && !styleFormatSupported ? Color.rgb(238, 174, 111) : C_MUTED);
+            editStyleHint.setVisibility(View.VISIBLE);
+        }
         if (fontsTreeUri == null) fontLabel.setText("No custom font folder selected. System fonts will be used.");
         if (outputTreeUri == null) outputFolderLabel.setText("Download/SubVoryn/Encoded/");
         refreshProposedFilename();
@@ -429,6 +464,33 @@ public class EncodingActivity extends Activity {
         intent.putExtra(SubtitleStyleEditorActivity.EXTRA_FONTS_URI, fontsTreeUri == null ? "" : fontsTreeUri.toString());
         try { startActivityForResult(intent, REQ_STYLE_EDITOR); }
         catch (Exception e) { toast("Subtitle Style Editor could not be opened: " + safeMessage(e)); }
+    }
+
+    // SUBVORYN_STYLE_FIX_V1: validate styled working file
+    /** Reject stale, malformed, wrong-format, or empty editor working files before binding them to Encoding. */
+    private boolean isValidStyledSubtitleWorkingFile(File candidate, String format) {
+        if (candidate == null || !candidate.isFile() || candidate.length() <= 0L
+                || candidate.length() > 20L * 1024L * 1024L) return false;
+        if (!(SubtitleStyleEngine.ASS.equals(format) || SubtitleStyleEngine.SSA.equals(format)
+                || SubtitleStyleEngine.VTT.equals(format))) return false;
+        StringBuilder body = new StringBuilder((int) Math.min(candidate.length(), 65536L));
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(new FileInputStream(candidate), "UTF-8"))) {
+            char[] buffer = new char[8192];
+            int read;
+            while ((read = reader.read(buffer)) != -1) {
+                if (body.length() + read > 20 * 1024 * 1024) return false;
+                body.append(buffer, 0, read);
+            }
+        } catch (Exception ignored) { return false; }
+        String text = body.toString();
+        if (!format.equals(SubtitleStyleEngine.detectFormat(candidate.getName(), text))) return false;
+        if (SubtitleStyleEngine.VTT.equals(format)) {
+            String trimmed = text.replace("\uFEFF", "").trim();
+            return trimmed.regionMatches(true, 0, "WEBVTT", 0, 6)
+                    && text.contains(SubtitleStyleEngine.MARKER_START)
+                    && text.contains(SubtitleStyleEngine.MARKER_END);
+        }
+        return !SubtitleStyleEngine.styleNames(text).isEmpty();
     }
 
     private void pickDocument(int requestCode) {
@@ -460,12 +522,21 @@ public class EncodingActivity extends Activity {
             if (resultCode == RESULT_OK && data != null) {
                 String path = data.getStringExtra(SubtitleStyleEditorActivity.EXTRA_STYLED_PATH);
                 String source = data.getStringExtra(SubtitleStyleEditorActivity.EXTRA_SOURCE_URI);
+                String format = data.getStringExtra(SubtitleStyleEditorActivity.EXTRA_FORMAT);
                 File candidate = path == null ? null : new File(path);
-                if (subtitleUri != null && source != null && source.equals(subtitleUri.toString()) && candidate != null && candidate.isFile() && candidate.length() > 0L) {
+                String expectedFormat = SubtitleStyleEngine.detectFormat(subtitleName, "");
+                // SUBVORYN_STYLE_FIX_V1: validate editor return contract
+                boolean valid = subtitleUri != null
+                        && source != null && source.equals(subtitleUri.toString())
+                        && candidate != null && candidate.isFile() && candidate.length() > 0L
+                        && format != null && format.equals(expectedFormat)
+                        && candidate != null && format.equals(SubtitleStyleEngine.detectFormat(candidate.getName(), ""))
+                        && isValidStyledSubtitleWorkingFile(candidate, format);
+                if (valid) {
                     appliedStyledSubtitle = candidate; appliedStyleSourceUri = source;
                     updateSelectionLabels(); refreshSummaryAndPreview();
                     toast("Subtitle style applied to the current encoding workflow.");
-                } else toast("Style result did not match the currently selected subtitle, or the working file is missing.");
+                } else toast("Styled result was rejected: the source, format, or working file did not match the current Encoding selection.");
             }
             return;
         }
