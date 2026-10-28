@@ -384,7 +384,7 @@ public class SubtitleStyleEditorActivity extends Activity {
 
     private void updatePreview() {
         if(preview==null || !loaded)return;
-        try {Map<String,String> m=collectValues(); preview.setStyle(String.valueOf(fontSpinner.getSelectedItem()),number(sizeEdit,42,8,200),primaryArgb,outlineArgb,backArgb,number(outlineEdit,2,0,20),number(shadowEdit,1,0,20),boldBox.isChecked(),italicBox.isChecked(),underlineBox.isChecked(),strikeBox.isChecked(),number(spacingEdit,0,0,40),alignmentSpinner==null?2:alignmentSpinner.getSelectedItemPosition()+1);}
+        try {Map<String,String> m=collectValues(); preview.setStyle(String.valueOf(fontSpinner.getSelectedItem()),(float)number(sizeEdit,42,8,200),primaryArgb,outlineArgb,backArgb,(float)number(outlineEdit,2,0,20),(float)number(shadowEdit,1,0,20),boldBox.isChecked(),italicBox.isChecked(),underlineBox.isChecked(),strikeBox.isChecked(),(float)number(spacingEdit,0,0,40),alignmentSpinner==null?2:alignmentSpinner.getSelectedItemPosition()+1);}
         catch(Exception ignored){}
     }
 
@@ -421,7 +421,6 @@ public class SubtitleStyleEditorActivity extends Activity {
         try{while((n=in.read(buffer))!=-1){if(out.size()+n>MAX_SOURCE_BYTES)throw new IOException("Subtitle exceeds the 20 MB editor safety limit.");out.write(buffer,0,n);}}finally{in.close();}
         return new String(out.toByteArray(),StandardCharsets.UTF_8);
     }
-    private String buildOutputText() {Map<String,String> m=collectValues();if(SubtitleStyleEngine.VTT.equals(sourceFormat))return SubtitleStyleEngine.editVttStyle(sourceText,m);return SubtitleStyleEngine.editAssStyle(sourceText,selectedStyle,m);}
     private void writeUtf8(File file,String text)throws IOException {FileOutputStream out=new FileOutputStream(file,false);try{out.write(text.getBytes(StandardCharsets.UTF_8));out.flush();}finally{out.close();}if(!file.isFile()||file.length()==0)throw new IOException("Styled working file was not written.");}
 
     private void addStepper(LinearLayout parent,String title,EditText edit,double min,double max,double step) {
