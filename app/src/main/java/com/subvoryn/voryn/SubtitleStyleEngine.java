@@ -71,6 +71,45 @@ public final class SubtitleStyleEngine {
         return result;
     }
 
+    /**
+     * Counts Dialogue records using each named ASS/SSA style, parsing the actual [Events] Format
+     * declaration instead of assuming a fixed Style column position. Unused styles stay visible
+     * in the returned map with a count of zero.
+     */
+    public static Map<String, Integer> styleUsageCounts(String content) {
+        Map<String, Integer> counts = new LinkedHashMap<String, Integer>();
+        for (String name : styleNames(content)) counts.put(name, 0);
+        if (content == null || counts.isEmpty()) return counts;
+        String section = "";
+        List<String> eventFormat = null;
+        for (String line : content.split("\\r\\n|\\n|\\r", -1)) {
+            String trim = line.trim();
+            if (trim.startsWith("[") && trim.endsWith("]")) {
+                section = trim.toLowerCase(Locale.ROOT);
+                eventFormat = null;
+                continue;
+            }
+            if (!"[events]".equals(section)) continue;
+            if (startsIgnoreCase(trim, "Format:")) {
+                eventFormat = csv(trim.substring(trim.indexOf(':') + 1));
+                continue;
+            }
+            if (!startsIgnoreCase(trim, "Dialogue:") || eventFormat == null) continue;
+            int styleIndex = indexOfIgnoreCase(eventFormat, "Style");
+            if (styleIndex < 0) continue;
+            List<String> fields = csv(trim.substring(trim.indexOf(':') + 1));
+            if (styleIndex >= fields.size()) continue;
+            String used = fields.get(styleIndex).trim();
+            for (String styleName : counts.keySet()) {
+                if (styleName.equalsIgnoreCase(used)) {
+                    counts.put(styleName, counts.get(styleName) + 1);
+                    break;
+                }
+            }
+        }
+        return counts;
+    }
+
     public static String styleValue(String content, String styleName, String fieldName) {
         if (content == null) return "";
         String section = "";

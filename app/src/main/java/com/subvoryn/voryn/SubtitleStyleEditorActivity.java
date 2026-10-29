@@ -93,9 +93,10 @@ public class SubtitleStyleEditorActivity extends Activity {
     private final Map<String, String> values = new LinkedHashMap<String, String>();
     private List<String> styleNames = new ArrayList<String>();
     private List<String> fontNames = new ArrayList<String>();
-    private LinearLayout root, content;
+    // SUBVORYN_STYLE_LAB_V2_0_3: render every named style as a visible selectable card
+    private LinearLayout root, content, namedStyleList;
     private TextView status, subtitleInfo, overrideWarning, fontFolderStatus, styleCountInfo, previewRenderStatus;
-    private Spinner styleSpinner, fontSpinner, alignmentSpinner, borderSpinner;
+    private Spinner fontSpinner, alignmentSpinner, borderSpinner;
     // SUBVORYN_STYLE_LAB_V2_0_2: debounced, real FFmpeg/libass preview worker.
     private final Handler previewHandler = new Handler(Looper.getMainLooper());
     private final ExecutorService previewExecutor = Executors.newSingleThreadExecutor();
@@ -174,14 +175,20 @@ public class SubtitleStyleEditorActivity extends Activity {
         LinearLayout sourceCard = card(); sourceCard.addView(section("01  SUBTITLE FILE & STYLE"), margin(-1, -2, 0, 7));
         subtitleInfo = text(sourceName + " · " + sourceFormat.toUpperCase(Locale.ROOT), 12, MUTED, false); sourceCard.addView(subtitleInfo, margin(-1, -2, 0, 9));
         if (SubtitleStyleEngine.ASS.equals(sourceFormat) || SubtitleStyleEngine.SSA.equals(sourceFormat)) {
-            sourceCard.addView(text("NAMED STYLE", 10, ACCENT, true), margin(-1, -2, 0, 4));
-            styleSpinner = spinner(styleNames.toArray(new String[0])); sourceCard.addView(styleSpinner, margin(-1, dp(46), 0, 5));
-            styleCountInfo = text(styleNames.size() + " named " + sourceFormat.toUpperCase(Locale.ROOT) + " styles found. Select the style used by the dialogue in this dropdown.", 11, MUTED, false);
+            sourceCard.addView(text("ALL NAMED STYLES", 10, ACCENT, true), margin(-1, -2, 0, 4));
+            styleCountInfo = text(styleNames.size() + " named " + sourceFormat.toUpperCase(Locale.ROOT) + " styles found. Every style is listed below with font, size, alignment and dialogue-use count. Tap a card to select it.", 11, MUTED, false);
             sourceCard.addView(styleCountInfo, margin(-1, -2, 0, 7));
-            styleSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
-                public void onItemSelected(android.widget.AdapterView<?> p, View v, int pos, long id) { if (loaded && !bindingValues) { try { workingText = SubtitleStyleEngine.editAssStyle(workingText, selectedStyle, collectValues()); } catch (Exception ex) { status.setText("Previous style edits could not be applied: " + message(ex)); return; } selectedStyle = styleNames.get(pos); prefs.edit().putString(key("selected_style"), selectedStyle).apply(); loadValuesFromSource(); } }
-                public void onNothingSelected(android.widget.AdapterView<?> p) { }
-            });
+            List<String> inlineFonts = SubtitleStyleEngine.inlineFontOverrides(sourceText);
+            if (!inlineFonts.isEmpty()) {
+                StringBuilder fontSummary = new StringBuilder();
+                for (String font : inlineFonts) { if (fontSummary.length() > 0) fontSummary.append(", "); fontSummary.append(font); }
+                TextView inlineFontInfo = text("Inline \\fn fonts found: " + fontSummary + ". These dialogue-level overrides may supersede the selected named style.", 11, Color.rgb(238, 174, 111), false);
+                sourceCard.addView(inlineFontInfo, margin(-1, -2, 0, 8));
+            }
+            namedStyleList = new LinearLayout(this);
+            namedStyleList.setOrientation(LinearLayout.VERTICAL);
+            sourceCard.addView(namedStyleList, margin(-1, -2, 0, 7));
+            renderNamedStylesList();
         } else {
             styleCountInfo = text("This is WebVTT (.vtt): it uses cue/CSS styling, not ASS named styles or inline \\fn tags. To edit the named styles and \\fn fonts shown in your ASS file, import that .ass/.ssa file in Encoding.", 11, Color.rgb(238, 174, 111), false);
             sourceCard.addView(styleCountInfo, margin(-1, -2, 0, 6));
@@ -259,9 +266,86 @@ public class SubtitleStyleEditorActivity extends Activity {
         Button back = button("Back", false); back.setOnClickListener(v -> finish());
         LinearLayout.LayoutParams backStickyParams = new LinearLayout.LayoutParams(0, dp(44), 1f); backStickyParams.leftMargin = dp(6); bottom.addView(back, backStickyParams);
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1)); root.addView(bottom, new LinearLayout.LayoutParams(-1, dp(60))); setContentView(root);
-        if (styleSpinner != null) styleSpinner.setSelection(Math.max(0, styleNames.indexOf(selectedStyle)));
         attachChanges();
         loaded = true;
+    }
+
+    // SUBVORYN_STYLE_LAB_V2_0_3: all-style list with readable metadata and real Dialogue use counts.
+    /** Render every ASS/SSA style as a selectable card; the selected item is highlighted. */
+    private void renderNamedStylesList() {
+        if (namedStyleList == null || styleNames == null) return;
+        namedStyleList.removeAllViews();
+        Map<String, Integer> useCounts = SubtitleStyleEngine.styleUsageCounts(workingText);
+        for (final String name : styleNames) {
+            final boolean selected = name.equalsIgnoreCase(selectedStyle);
+            LinearLayout item = new LinearLayout(this);
+            item.setOrientation(LinearLayout.VERTICAL);
+            item.setPadding(dp(11), dp(9), dp(11), dp(9));
+            item.setBackgroundDrawable(round(selected ? ACCENT_DARK : RAISED, selected ? ACCENT : BORDER, 12));
+            item.setClickable(true);
+            item.setFocusable(true);
+
+            String family = styleField(name, "Fontname", "Unknown font");
+            String size = styleField(name, "Fontsize", "?");
+            String alignment = styleField(name, "Alignment", "2");
+            StringBuilder properties = new StringBuilder();
+            properties.append(family).append(" · ").append(size).append(" px · ").append(alignmentLabel(alignment));
+            if (isTrue(styleField(name, "Bold", "0"))) properties.append(" · Bold");
+            if (isTrue(styleField(name, "Italic", "0"))) properties.append(" · Italic");
+            if (isTrue(styleField(name, "Underline", "0"))) properties.append(" · Underline");
+            if (isTrue(styleField(name, "StrikeOut", "0"))) properties.append(" · Strike");
+            properties.append(" · Outline ").append(styleField(name, "Outline", "0"));
+            properties.append(" · Shadow ").append(styleField(name, "Shadow", "0"));
+
+            TextView title = text((selected ? "✓ SELECTED · " : "TAP TO SELECT · ") + name, 13, TEXT, true);
+            item.addView(title, new LinearLayout.LayoutParams(-1, -2));
+            TextView details = text(properties.toString(), 11, MUTED, false);
+            details.setPadding(0, dp(3), 0, 0);
+            item.addView(details, new LinearLayout.LayoutParams(-1, -2));
+
+            Integer count = useCounts.get(name);
+            int cueCount = count == null ? 0 : count;
+            TextView usage = text("Used by " + cueCount + " Dialogue cue" + (cueCount == 1 ? "" : "s"), 10, selected ? ACCENT : MUTED, true);
+            usage.setPadding(0, dp(3), 0, 0);
+            item.addView(usage, new LinearLayout.LayoutParams(-1, -2));
+
+            int primary = SubtitleStyleEngine.assColorToArgb(styleField(name, "PrimaryColour", "&H00FFFFFF"));
+            int fontStyle = (isTrue(styleField(name, "Bold", "0")) ? Typeface.BOLD : Typeface.NORMAL)
+                    | (isTrue(styleField(name, "Italic", "0")) ? Typeface.ITALIC : 0);
+            TextView sample = text("Aa — Main tumhe kabhi chhodunga nahi.", 14, primary, false);
+            sample.setTypeface(Typeface.create(family, fontStyle));
+            sample.setMaxLines(2);
+            int paintFlags = sample.getPaintFlags();
+            if (isTrue(styleField(name, "Underline", "0"))) paintFlags |= Paint.UNDERLINE_TEXT_FLAG;
+            if (isTrue(styleField(name, "StrikeOut", "0"))) paintFlags |= Paint.STRIKE_THRU_TEXT_FLAG;
+            sample.setPaintFlags(paintFlags);
+            sample.setPadding(0, dp(4), 0, 0);
+            item.addView(sample, new LinearLayout.LayoutParams(-1, -2));
+
+            item.setContentDescription("Style " + name + ". " + properties + ". Used by " + cueCount + " dialogue cues. Tap to edit.");
+            item.setOnClickListener(v -> selectNamedStyle(name));
+            namedStyleList.addView(item, margin(-1, -2, 0, 6));
+        }
+    }
+
+    private String styleField(String name, String field, String fallback) {
+        String found = SubtitleStyleEngine.styleValue(workingText, name, field);
+        return found == null || found.trim().length() == 0 ? fallback : found.trim();
+    }
+
+    private void selectNamedStyle(String name) {
+        if (!loaded || name == null || name.equalsIgnoreCase(selectedStyle)) return;
+        try {
+            // Commit the previous card's controls into its own named Style record before switching.
+            workingText = SubtitleStyleEngine.editAssStyle(workingText, selectedStyle, collectValues());
+            selectedStyle = name;
+            prefs.edit().putString(key("selected_style"), selectedStyle).apply();
+            loadValuesFromSource();
+            renderNamedStylesList();
+            if (status != null) status.setText("Selected ASS/SSA style: " + selectedStyle + ". Its controls and live preview are loaded below.");
+        } catch (Exception ex) {
+            if (status != null) status.setText("Could not switch style: " + message(ex) + ". Correct the current values and try again.");
+        }
     }
 
     private void attachChanges() {

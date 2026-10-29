@@ -12,8 +12,8 @@ android {
         targetSdk 29
         ndk { abiFilters 'arm64-v8a', 'x86_64' }
         // SUBVORYN_STYLE_LAB_V2_0_2
-        versionCode 22
-        versionName '2.0.2'
+        versionCode 23
+        versionName '2.0.3'
     }
 
     compileOptions {
