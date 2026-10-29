@@ -325,6 +325,88 @@ public final class SubtitleStyleEngine {
         return Pattern.compile("(?i)\\{[^}]*\\\\(?:fn|fs|b|i|u|s|bord|shad|c|1c|3c|4c|alpha|1a|3a|4a|an)").matcher(source).find();
     }
 
+    // SUBVORYN_STYLE_LAB_V2_0_2: report actual inline ASS/SSA font overrides.
+    /** Returns distinct non-empty font names found in inline \\fn tags, in source order. */
+    public static List<String> inlineFontOverrides(String source) {
+        if (source == null || source.length() == 0) return Collections.emptyList();
+        List<String> result = new ArrayList<String>();
+        Matcher matcher = Pattern.compile("(?i)\\\\fn([^\\\\}]*?)(?=\\\\[a-zA-Z]|\\})").matcher(source);
+        while (matcher.find()) {
+            String font = matcher.group(1) == null ? "" : matcher.group(1).trim();
+            if (font.length() == 0) continue;
+            boolean duplicate = false;
+            for (String found : result) if (found.equalsIgnoreCase(font)) { duplicate = true; break; }
+            if (!duplicate) result.add(font);
+        }
+        return result;
+    }
+
+    // SUBVORYN_STYLE_LAB_V2_0_2: generate a temporary preview file while preserving native styles.
+    /**
+     * Builds an ephemeral ASS/SSA script with the original Script Info and all named style
+     * records, but one sample Dialogue using the selected named style. The imported source is
+     * never rewritten. ASS Text is required to be the final Format column, per the ASS format.
+     */
+    public static String buildAssPreviewSource(String source, String styleName, String sampleText) {
+        if (source == null || source.trim().length() == 0) throw new IllegalArgumentException("ASS/SSA preview source is empty.");
+        if (styleName == null || styleName.trim().length() == 0) throw new IllegalArgumentException("Select a named style for preview.");
+        String[] lines = source.split("\\r\\n|\\n|\\r", -1);
+        int events = -1;
+        int formatLine = -1;
+        String section = "";
+        for (int i = 0; i < lines.length; i++) {
+            String trim = lines[i].trim();
+            if (trim.startsWith("[") && trim.endsWith("]")) {
+                section = trim.toLowerCase(Locale.ROOT);
+                if ("[events]".equals(section)) { events = i; formatLine = -1; continue; }
+                if (events >= 0 && i > events) break;
+            }
+            if (events >= 0 && "[events]".equals(section) && startsIgnoreCase(trim, "Format:")) {
+                formatLine = i;
+                break;
+            }
+        }
+        if (events < 0 || formatLine < 0) throw new IllegalArgumentException("No [Events] Format declaration was found for ASS/SSA preview.");
+        String formatText = lines[formatLine].substring(lines[formatLine].indexOf(':') + 1).trim();
+        List<String> fields = csv(formatText);
+        int textIndex = indexOfIgnoreCase(fields, "Text");
+        int styleIndex = indexOfIgnoreCase(fields, "Style");
+        int startIndex = indexOfIgnoreCase(fields, "Start");
+        int endIndex = indexOfIgnoreCase(fields, "End");
+        if (textIndex < 0 || textIndex != fields.size() - 1)
+            throw new IllegalArgumentException("ASS/SSA preview needs Text as the final Events Format column.");
+        if (styleIndex < 0 || startIndex < 0 || endIndex < 0)
+            throw new IllegalArgumentException("ASS/SSA Events Format is missing Style, Start or End.");
+        List<String> knownStyles = styleNames(source);
+        boolean styleFound = false;
+        for (String candidate : knownStyles) if (candidate.equalsIgnoreCase(styleName)) { styleFound = true; break; }
+        if (!styleFound) throw new IllegalArgumentException("Preview style was not found in the source file: " + styleName);
+        List<String> values = new ArrayList<String>();
+        for (int i = 0; i < fields.size(); i++) values.add("");
+        for (int i = 0; i < fields.size(); i++) {
+            String field = fields.get(i).trim().toLowerCase(Locale.ROOT);
+            if ("layer".equals(field)) values.set(i, "0");
+            else if ("marked".equals(field)) values.set(i, "Marked=0");
+            else if ("start".equals(field)) values.set(i, "0:00:00.00");
+            else if ("end".equals(field)) values.set(i, "0:00:05.00");
+            else if ("style".equals(field)) values.set(i, styleName);
+            else if ("marginl".equals(field)) values.set(i, defaultStyleValue(source, styleName, "MarginL", "20"));
+            else if ("marginr".equals(field)) values.set(i, defaultStyleValue(source, styleName, "MarginR", "20"));
+            else if ("marginv".equals(field)) values.set(i, defaultStyleValue(source, styleName, "MarginV", "24"));
+            else if ("text".equals(field)) values.set(i, (sampleText == null || sampleText.length() == 0) ? "Main tumhe kabhi chhodunga nahi." : sampleText.replace("\r", " ").replace("\n", "\\N"));
+        }
+        StringBuilder out = new StringBuilder(source.length() + 180);
+        for (int i = 0; i < events; i++) out.append(lines[i]).append('\n');
+        out.append(lines[events]).append('\n').append(lines[formatLine]).append('\n');
+        out.append("Dialogue: ").append(joinCsv(values)).append('\n');
+        return out.toString();
+    }
+
+    private static String defaultStyleValue(String source, String styleName, String fieldName, String fallback) {
+        String value = styleValue(source, styleName, fieldName);
+        return value == null || value.length() == 0 ? fallback : value;
+    }
+
     private static String value(Map<String, String> map, String key, String fallback) {
         if (map == null || map.get(key) == null || map.get(key).trim().length() == 0) return fallback;
         return map.get(key).trim();

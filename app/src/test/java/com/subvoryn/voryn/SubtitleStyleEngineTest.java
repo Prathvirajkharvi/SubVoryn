@@ -123,6 +123,26 @@ public class SubtitleStyleEngineTest {
         }
     }
 
+    // SUBVORYN_STYLE_LAB_V2_0_2: prove \\fn extraction and source-aware native preview creation.
+    @Test public void inlineFontOverridesAreExtractedDistinctlyFromDialogueTags() {
+        List<String> fonts = SubtitleStyleEngine.inlineFontOverrides(
+                "Dialogue: 0,0:00:00.00,0:00:01.00,Default,,0,0,0,,{\\fnRoboto Bk\\fs60}Hello {\\fnArial}World {\\fnRoboto Bk}Again");
+        assertEquals(2, fonts.size());
+        assertEquals("Roboto Bk", fonts.get(0));
+        assertEquals("Arial", fonts.get(1));
+    }
+
+    @Test public void ffmpegAssPreviewUsesSelectedNativeStyleAndKeepsOtherStyles() {
+        String preview = SubtitleStyleEngine.buildAssPreviewSource(ASS, "Signs", "Main tumhe kabhi chhodunga nahi.");
+        assertTrue(preview.contains("Title: Preserve me"));
+        assertTrue(preview.contains("Style: Main,44,Arial"));
+        assertTrue(preview.contains("Style: Signs,30,Montserrat"));
+        assertTrue(preview.contains("Format: Layer, Start, End, Style, Name"));
+        assertTrue(preview.contains("Signs"));
+        assertTrue(preview.contains("Main tumhe kabhi chhodunga nahi."));
+        assertFalse(preview.contains("Keep, this!"));
+    }
+
     @Test public void formatDetectionHonorsExtensionAndVttHeader() {
         assertEquals(SubtitleStyleEngine.SSA,SubtitleStyleEngine.detectFormat("captions.ssa","not parsed"));
         assertEquals(SubtitleStyleEngine.VTT,SubtitleStyleEngine.detectFormat("data.txt","WEBVTT\n\n"));

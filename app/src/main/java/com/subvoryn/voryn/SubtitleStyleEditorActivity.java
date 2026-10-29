@@ -7,6 +7,8 @@ import android.content.ContentValues;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.database.Cursor;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
@@ -15,6 +17,8 @@ import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
 import android.text.Editable;
@@ -55,6 +59,12 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+import com.arthenica.ffmpegkit.FFmpegKit;
+import com.arthenica.ffmpegkit.FFmpegSession;
+import com.arthenica.ffmpegkit.ReturnCode;
 
 /** Real, preservation-first style editor for ASS/SSA and WebVTT subtitle files. */
 public class SubtitleStyleEditorActivity extends Activity {
@@ -84,8 +94,14 @@ public class SubtitleStyleEditorActivity extends Activity {
     private List<String> styleNames = new ArrayList<String>();
     private List<String> fontNames = new ArrayList<String>();
     private LinearLayout root, content;
-    private TextView status, subtitleInfo, overrideWarning, fontFolderStatus;
+    private TextView status, subtitleInfo, overrideWarning, fontFolderStatus, styleCountInfo, previewRenderStatus;
     private Spinner styleSpinner, fontSpinner, alignmentSpinner, borderSpinner;
+    // SUBVORYN_STYLE_LAB_V2_0_2: debounced, real FFmpeg/libass preview worker.
+    private final Handler previewHandler = new Handler(Looper.getMainLooper());
+    private final ExecutorService previewExecutor = Executors.newSingleThreadExecutor();
+    private Runnable pendingPreview;
+    private volatile long previewGeneration = 0L;
+    private static final String PREVIEW_SAMPLE = "Main tumhe kabhi chhodunga nahi.";
     private EditText sizeEdit, outlineEdit, shadowEdit, spacingEdit, marginLEdit, marginREdit, marginVEdit;
     private CheckBox boldBox, italicBox, underlineBox, strikeBox;
     private Button primaryColorButton, secondaryColorButton, outlineColorButton, backColorButton;
@@ -160,11 +176,17 @@ public class SubtitleStyleEditorActivity extends Activity {
         if (SubtitleStyleEngine.ASS.equals(sourceFormat) || SubtitleStyleEngine.SSA.equals(sourceFormat)) {
             sourceCard.addView(text("NAMED STYLE", 10, ACCENT, true), margin(-1, -2, 0, 4));
             styleSpinner = spinner(styleNames.toArray(new String[0])); sourceCard.addView(styleSpinner, margin(-1, dp(46), 0, 5));
+            styleCountInfo = text(styleNames.size() + " named " + sourceFormat.toUpperCase(Locale.ROOT) + " styles found. Select the style used by the dialogue in this dropdown.", 11, MUTED, false);
+            sourceCard.addView(styleCountInfo, margin(-1, -2, 0, 7));
             styleSpinner.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener() {
                 public void onItemSelected(android.widget.AdapterView<?> p, View v, int pos, long id) { if (loaded && !bindingValues) { try { workingText = SubtitleStyleEngine.editAssStyle(workingText, selectedStyle, collectValues()); } catch (Exception ex) { status.setText("Previous style edits could not be applied: " + message(ex)); return; } selectedStyle = styleNames.get(pos); prefs.edit().putString(key("selected_style"), selectedStyle).apply(); loadValuesFromSource(); } }
                 public void onNothingSelected(android.widget.AdapterView<?> p) { }
             });
-        } else sourceCard.addView(text("VTT styling uses a portable STYLE block; rendering-only stroke/shadow are applied by SubVoryn's hardsub path.", 11, MUTED, false), margin(-1, -2, 0, 4));
+        } else {
+            styleCountInfo = text("This is WebVTT (.vtt): it uses cue/CSS styling, not ASS named styles or inline \\fn tags. To edit the named styles and \\fn fonts shown in your ASS file, import that .ass/.ssa file in Encoding.", 11, Color.rgb(238, 174, 111), false);
+            sourceCard.addView(styleCountInfo, margin(-1, -2, 0, 6));
+            sourceCard.addView(text("VTT styling uses a portable STYLE block; stroke/shadow for SubVoryn hardsub are rendered by FFmpeg with VTT-only style overrides.", 11, MUTED, false), margin(-1, -2, 0, 4));
+        }
         status = text("Editing a safe working copy. The imported original will remain unchanged.", 11, ACCENT, false); sourceCard.addView(status, margin(-1, -2, 0, 0));
         content.addView(sourceCard, margin(-1, -2, 0, 11));
 
@@ -210,7 +232,9 @@ public class SubtitleStyleEditorActivity extends Activity {
 
         LinearLayout previewCard = card(); previewCard.addView(section("06  LIVE PREVIEW"), margin(-1, -2, 0, 7));
         preview = new StrokePreviewView(this); preview.setBackgroundDrawable(round(Color.rgb(10, 12, 18), BORDER, 13)); previewCard.addView(preview, margin(-1, dp(172), 0, 7));
-        previewCard.addView(text("Preview approximates the selected style. Final appearance may differ slightly in FFmpeg/libass, especially for custom fonts and inline ASS overrides.", 11, MUTED, false));
+        previewRenderStatus = text("Preparing real FFmpeg/libass preview… Android Canvas is only the fallback if the renderer fails.", 11, MUTED, false);
+        previewCard.addView(previewRenderStatus, margin(-1, 2, 0, 4));
+        previewCard.addView(text("The preview uses SubVoryn's bundled FFmpeg/libass and a sample Dialogue. Device/player output can still differ for video resolution, missing custom fonts and dialogue-specific inline overrides.", 11, MUTED, false));
         overrideWarning = text("", 11, ACCENT, false); previewCard.addView(overrideWarning, margin(-1, 7, 0, 0));
         content.addView(previewCard, margin(-1, -2, 0, 11));
 
@@ -230,7 +254,10 @@ public class SubtitleStyleEditorActivity extends Activity {
         content.addView(actions, margin(-1, -2, 0, 11));
 
         LinearLayout bottom = new LinearLayout(this); bottom.setPadding(dp(12), dp(8), dp(12), dp(8)); bottom.setBackgroundColor(PANEL);
-        Button back = button("Back", false); back.setOnClickListener(v -> finish()); bottom.addView(back, new LinearLayout.LayoutParams(0, dp(44), 1));
+        Button saveAsSticky = button("Save As", true); saveAsSticky.setContentDescription("Save styled subtitle as a new file without overwriting the original"); saveAsSticky.setOnClickListener(v -> saveAsNewFile());
+        LinearLayout.LayoutParams saveStickyParams = new LinearLayout.LayoutParams(0, dp(44), 1f); saveStickyParams.rightMargin = dp(6); bottom.addView(saveAsSticky, saveStickyParams);
+        Button back = button("Back", false); back.setOnClickListener(v -> finish());
+        LinearLayout.LayoutParams backStickyParams = new LinearLayout.LayoutParams(0, dp(44), 1f); backStickyParams.leftMargin = dp(6); bottom.addView(back, backStickyParams);
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1)); root.addView(bottom, new LinearLayout.LayoutParams(-1, dp(60))); setContentView(root);
         if (styleSpinner != null) styleSpinner.setSelection(Math.max(0, styleNames.indexOf(selectedStyle)));
         attachChanges();
@@ -268,8 +295,20 @@ public class SubtitleStyleEditorActivity extends Activity {
         backArgb = SubtitleStyleEngine.assColorToArgb(value("BackColour","&H80000000"));
         updateColorButton(primaryColorButton, "Primary Colour", primaryArgb); updateColorButton(secondaryColorButton,"Secondary / Karaoke Colour",secondaryArgb);
         updateColorButton(outlineColorButton,"Outline / Stroke Colour",outlineArgb); updateColorButton(backColorButton,"Shadow / Background Colour",backArgb);
-        if (overrideWarning != null) overrideWarning.setText((SubtitleStyleEngine.ASS.equals(sourceFormat)||SubtitleStyleEngine.SSA.equals(sourceFormat)) && SubtitleStyleEngine.hasInlineAppearanceOverrides(sourceText)
-                ? "Some dialogue has inline ASS overrides (font, size, colour, border or alignment). Those overrides are preserved and may supersede the selected named style." : "");
+        if (overrideWarning != null) {
+            boolean assSource = SubtitleStyleEngine.ASS.equals(sourceFormat) || SubtitleStyleEngine.SSA.equals(sourceFormat);
+            List<String> inlineFonts = assSource ? SubtitleStyleEngine.inlineFontOverrides(sourceText) : new ArrayList<String>();
+            StringBuilder warning = new StringBuilder();
+            if (assSource && SubtitleStyleEngine.hasInlineAppearanceOverrides(sourceText))
+                warning.append("This ASS/SSA contains inline appearance overrides. They are preserved and may supersede the selected named style.");
+            if (!inlineFonts.isEmpty()) {
+                if (warning.length() > 0) warning.append("\n");
+                warning.append("Inline \\fn font override(s) found: ");
+                for (int i = 0; i < inlineFonts.size(); i++) { if (i > 0) warning.append(", "); warning.append(inlineFonts.get(i)); }
+                warning.append(". These belong to individual Dialogue lines; the sample preview renders the selected named style.");
+            }
+            overrideWarning.setText(warning.toString());
+        }
         bindingValues = false;
         updatePreview();
     }
@@ -384,9 +423,109 @@ public class SubtitleStyleEditorActivity extends Activity {
 
     private void updatePreview() {
         if(preview==null || !loaded)return;
-        try {Map<String,String> m=collectValues(); preview.setStyle(String.valueOf(fontSpinner.getSelectedItem()),(float)number(sizeEdit,42,8,200),primaryArgb,outlineArgb,backArgb,(float)number(outlineEdit,2,0,20),(float)number(shadowEdit,1,0,20),boldBox.isChecked(),italicBox.isChecked(),underlineBox.isChecked(),strikeBox.isChecked(),(float)number(spacingEdit,0,0,40),alignmentSpinner==null?2:alignmentSpinner.getSelectedItemPosition()+1);}
-        catch(Exception ignored){}
+        try {
+            Map<String,String> m=collectValues();
+            preview.setStyle(String.valueOf(fontSpinner.getSelectedItem()),(float)number(sizeEdit,42,8,200),primaryArgb,outlineArgb,backArgb,(float)number(outlineEdit,2,0,20),(float)number(shadowEdit,1,0,20),boldBox.isChecked(),italicBox.isChecked(),underlineBox.isChecked(),strikeBox.isChecked(),(float)number(spacingEdit,0,0,40),alignmentSpinner==null?2:alignmentSpinner.getSelectedItemPosition()+1);
+            scheduleFfmpegPreview();
+        } catch(Exception ignored) {
+            if (previewRenderStatus != null) previewRenderStatus.setText("Enter valid style values to refresh the FFmpeg/libass preview.");
+        }
         refreshFontFamilyWarning();
+    }
+
+    // SUBVORYN_STYLE_LAB_V2_0_2: debounced actual renderer preview; Canvas remains a visibly identified fallback.
+    private void scheduleFfmpegPreview() {
+        if (previewHandler == null || preview == null || !loaded) return;
+        final long token = ++previewGeneration;
+        if (pendingPreview != null) previewHandler.removeCallbacks(pendingPreview);
+        if (previewRenderStatus != null) { previewRenderStatus.setText("Rendering sample with bundled FFmpeg/libass…"); previewRenderStatus.setTextColor(MUTED); }
+        pendingPreview = new Runnable() {
+            @Override public void run() {
+                final String format = sourceFormat;
+                final String source = workingText;
+                final String styleName = selectedStyle;
+                final Map<String,String> style;
+                try { style = new LinkedHashMap<String,String>(collectValues()); }
+                catch (Exception invalid) { if (previewRenderStatus != null) previewRenderStatus.setText("Enter valid style values to refresh the FFmpeg/libass preview."); return; }
+                previewExecutor.execute(new Runnable() {
+                    @Override public void run() { renderFfmpegPreview(token, format, source, styleName, style); }
+                });
+            }
+        };
+        previewHandler.postDelayed(pendingPreview, 450L);
+    }
+
+    private void renderFfmpegPreview(final long token, String format, String source, String styleName, Map<String,String> style) {
+        Bitmap resultBitmap = null;
+        String failure = "";
+        try {
+            File dir = new File(getCacheDir(), "subvoryn-style-preview");
+            if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("Cannot create private preview workspace.");
+            boolean vtt = SubtitleStyleEngine.VTT.equals(format);
+            String extension = vtt ? "vtt" : "ass";
+            File subtitle = new File(dir, "selected-style-preview." + extension);
+            File image = new File(dir, "selected-style-preview.png");
+            String script;
+            if (vtt) {
+                String sample = "WEBVTT\n\nsubvoryn-preview\n00:00:00.000 --> 00:00:05.000\n" + PREVIEW_SAMPLE + "\n";
+                script = SubtitleStyleEngine.editVttStyle(sample, style);
+            } else {
+                String edited = SubtitleStyleEngine.editAssStyle(source, styleName, style);
+                script = SubtitleStyleEngine.buildAssPreviewSource(edited, styleName, PREVIEW_SAMPLE);
+            }
+            writeUtf8(subtitle, script);
+            if (image.exists() && !image.delete()) throw new IOException("Cannot replace the prior preview image.");
+            String subtitlePath = escapePreviewFilterPath(subtitle.getAbsolutePath());
+            String filter = "subtitles=filename='" + subtitlePath + "'";
+            if (vtt) {
+                filter += ":force_style='" + escapePreviewForceStyle(SubtitleStyleEngine.buildVttForceStyle(style)) + "'";
+            } else {
+                filter += ":fontsdir='/system/fonts'";
+            }
+            String[] command = new String[] {
+                "-hide_banner", "-y", "-f", "lavfi", "-i", "color=c=0x0A0C12:s=960x540:d=1.0",
+                "-vf", filter, "-frames:v", "1", "-f", "image2", image.getAbsolutePath()
+            };
+            FFmpegSession session = FFmpegKit.executeWithArguments(command);
+            if (session == null) throw new IOException("FFmpegKit returned no preview session.");
+            if (!ReturnCode.isSuccess(session.getReturnCode())) {
+                String detail = session.getFailStackTrace();
+                if (detail == null || detail.trim().length() == 0) detail = session.getOutput();
+                throw new IOException("FFmpeg/libass preview failed" + (detail == null ? "." : ": " + detail));
+            }
+            resultBitmap = BitmapFactory.decodeFile(image.getAbsolutePath());
+            if (resultBitmap == null) throw new IOException("FFmpeg completed but the preview PNG could not be decoded.");
+        } catch (Throwable error) {
+            failure = error.getMessage() == null ? error.getClass().getSimpleName() : error.getMessage();
+        }
+        final Bitmap bitmap = resultBitmap;
+        final String errorText = failure;
+        runOnUiThread(new Runnable() {
+            @Override public void run() {
+                if (isFinishing() || isDestroyed() || token != previewGeneration) { if (bitmap != null && !bitmap.isRecycled()) bitmap.recycle(); return; }
+                if (bitmap != null) {
+                    preview.setRenderedBitmap(bitmap);
+                    if (previewRenderStatus != null) {
+                        previewRenderStatus.setText("Actual FFmpeg/libass preview rendered using " + (SubtitleStyleEngine.VTT.equals(sourceFormat) ? "VTT-only force_style" : "the selected native ASS/SSA style") + ". Inline Dialogue overrides are listed separately above.");
+                        previewRenderStatus.setTextColor(ACCENT);
+                    }
+                } else {
+                    if (previewRenderStatus != null) {
+                        String shortError = errorText.length() > 180 ? errorText.substring(0, 177) + "…" : errorText;
+                        previewRenderStatus.setText("FFmpeg/libass preview unavailable; the Android Canvas approximation is shown instead. " + shortError);
+                        previewRenderStatus.setTextColor(Color.rgb(238, 174, 111));
+                    }
+                }
+            }
+        });
+    }
+
+    private String escapePreviewFilterPath(String path) {
+        return path.replace("\\", "\\\\").replace(":", "\\:").replace("'", "\\'").replace(",", "\\,").replace("[", "\\[").replace("]", "\\]");
+    }
+
+    private String escapePreviewForceStyle(String value) {
+        return value == null ? "" : value.replace("\\", "\\\\").replace("'", "\\'").replace(":", "\\:");
     }
 
     // SUBVORYN_STYLE_FIX_V1: font family vs font-file name warning
@@ -506,9 +645,28 @@ public class SubtitleStyleEditorActivity extends Activity {
     private final class StrokePreviewView extends View {
         private final String sample="Main tumhe kabhi chhodunga nahi.";
         private String family="Roboto"; private float size=42,stroke=2,shadow=1,spacing=0; private int fill=Color.WHITE,edge=Color.BLACK,back=0x80000000,alignment=2; private boolean bold,italic,under,strike;
+        private Bitmap renderedBitmap;
         StrokePreviewView(Context c){super(c);setLayerType(View.LAYER_TYPE_SOFTWARE,null);setPadding(dp(12),dp(12),dp(12),dp(12));}
         void setStyle(String f,float s,int p,int o,int bg,float st,float sh,boolean b,boolean i,boolean u,boolean x,float sp,int a){family=f;size=s;fill=p;edge=o;back=bg;stroke=st;shadow=sh;bold=b;italic=i;under=u;strike=x;spacing=sp;alignment=Math.max(1,Math.min(9,a));invalidate();}
-        @Override protected void onDraw(Canvas canvas){super.onDraw(canvas);float w=Math.max(1,getWidth()-getPaddingLeft()-getPaddingRight());int style=(bold?Typeface.BOLD:Typeface.NORMAL)|(italic?Typeface.ITALIC:0);Typeface tf=Typeface.create(family,style);
+        void setRenderedBitmap(Bitmap bitmap) {
+            Bitmap previous = renderedBitmap;
+            renderedBitmap = bitmap;
+            if (previous != null && previous != bitmap && !previous.isRecycled()) previous.recycle();
+            invalidate();
+        }
+        @Override protected void onDraw(Canvas canvas){super.onDraw(canvas);
+            if (renderedBitmap != null && !renderedBitmap.isRecycled()) {
+                Paint imagePaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+                float viewW = Math.max(1, getWidth()), viewH = Math.max(1, getHeight());
+                float imageRatio = (float) renderedBitmap.getWidth() / Math.max(1, renderedBitmap.getHeight());
+                float viewRatio = viewW / viewH;
+                float drawW, drawH, left, top;
+                if (viewRatio > imageRatio) { drawH = viewH; drawW = drawH * imageRatio; left = (viewW - drawW) / 2f; top = 0f; }
+                else { drawW = viewW; drawH = drawW / imageRatio; left = 0f; top = (viewH - drawH) / 2f; }
+                canvas.drawBitmap(renderedBitmap, null, new RectF(left, top, left + drawW, top + drawH), imagePaint);
+                return;
+            }
+            float w=Math.max(1,getWidth()-getPaddingLeft()-getPaddingRight());int style=(bold?Typeface.BOLD:Typeface.NORMAL)|(italic?Typeface.ITALIC:0);Typeface tf=Typeface.create(family,style);
             TextPaint p=new TextPaint(Paint.ANTI_ALIAS_FLAG|Paint.SUBPIXEL_TEXT_FLAG);p.setTypeface(tf);p.setTextSize(spToPx(size));p.setLetterSpacing(Math.min(.5f,spacing/100.0f));p.setUnderlineText(under);p.setStrikeThruText(strike);
             Layout.Alignment textAlignment=(alignment%3==1)?Layout.Alignment.ALIGN_NORMAL:(alignment%3==0?Layout.Alignment.ALIGN_OPPOSITE:Layout.Alignment.ALIGN_CENTER);
             StaticLayout layout=StaticLayout.Builder.obtain(sample,0,sample.length(),p,(int)w).setAlignment(textAlignment).setIncludePad(false).build();
@@ -517,5 +675,12 @@ public class SubtitleStyleEditorActivity extends Activity {
             p.setStyle(Paint.Style.FILL);p.setColor(fill);if(shadow>0)p.setShadowLayer(shadow*getResources().getDisplayMetrics().density,0,shadow*getResources().getDisplayMetrics().density,back);layout.draw(canvas);p.clearShadowLayer();canvas.restore();
         }
         private float spToPx(float v){return v*getResources().getDisplayMetrics().scaledDensity;}
+    }
+
+    @Override protected void onDestroy() {
+        previewGeneration++;
+        if (pendingPreview != null) previewHandler.removeCallbacks(pendingPreview);
+        previewExecutor.shutdownNow();
+        super.onDestroy();
     }
 }
