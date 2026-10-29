@@ -143,17 +143,20 @@ public class SubtitleStyleEngineTest {
         assertFalse(preview.contains("Keep, this!"));
     }
 
+    // SUBVORYN_FIX_STYLE_USAGE_TEST_V2_0_3: use actual newline-separated ASS sections.
     @Test public void styleUsageCountsParseActualEventsFormatAndKeepUnusedStyles() {
-        String source = "[V4+ Styles]\\n"
-                + "Format: Name, Fontname, Fontsize, Alignment\\n"
-                + "Style: Default,Arial,44,2\\n"
-                + "Style: 4-normal,Noto Sans,65,4\\n"
-                + "Style: Unused,Roboto,20,2\\n"
-                + "[Events]\\n"
-                + "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\\n"
-                + "Dialogue: 0,0:00:00.00,0:00:01.00,4-normal,,0,0,0,,Hello, world\\n"
-                + "Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,Hi\\n"
-                + "Dialogue: 0,0:00:02.00,0:00:03.00,4-normal,,0,0,0,,Again\\n";
+        String source = String.join("\n",
+                "[V4+ Styles]",
+                "Format: Name, Fontname, Fontsize, Alignment",
+                "Style: Default,Arial,44,2",
+                "Style: 4-normal,Noto Sans,65,4",
+                "Style: Unused,Roboto,20,2",
+                "[Events]",
+                "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
+                "Dialogue: 0,0:00:00.00,0:00:01.00,4-normal,,0,0,0,,Hello, world",
+                "Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,Hi",
+                "Dialogue: 0,0:00:02.00,0:00:03.00,4-normal,,0,0,0,,Again",
+                "");
         Map<String, Integer> counts = SubtitleStyleEngine.styleUsageCounts(source);
         assertEquals(Integer.valueOf(2), counts.get("4-normal"));
         assertEquals(Integer.valueOf(1), counts.get("Default"));
